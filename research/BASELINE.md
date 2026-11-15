@@ -1,0 +1,49 @@
+# ObjectStack 研究基线与首轮证据登记
+
+> 核查日期：2026-11-15。以下是对 GitHub API 和选定源码文件的初步读取；**未在本地克隆、编译、运行或测试**。
+
+## 1. 研究快照
+
+- 用户 Fork：https://github.com/scbdzhwl/objectstack-analysis
+- 上游：https://github.com/objectstack-ai/objectstack
+- 关系：GitHub API 确认 fork=true，parent=objectstack-ai/objectstack。
+- 固定快照：**6c5d31fac7763e7aaebc5e853c17727698e8126a**；所有研究源码链接默认按此 commit 固定。
+- 核查时，上游 main 为 6e287974e2d2fcff54b67a89d14bbb6bba9c3ead，上游相较 Fork 已前进约 152 次提交；该数字是一次性快照，不自动更新。
+- 主分支为 main；许可证：Apache-2.0（具体商业服务和自托管边界应再次核对 LICENSING.md）。
+- Git 树扫描约 25,303 个 blob 文件和 1,135 个目录；按文件名规则检测到约 14,436 个测试文件，不等于实际测试执行率、有效覆盖率或全部通过。
+- 当前工作目录仅作为研究独立区域；Fork 原始文件和根 AGENTS 都是上游资料。
+
+## 2. 已打开的核心入口及待核查问题
+
+| 原始入口 | 本轮可确认的事实 | 需要继续核查 |
+|---|---|---|
+| [README.md](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/README.md) | 定位为“可执行业务本体”，声称 AI 编写元数据并由运行时消费 | 宣称功能对应哪些消费者和已执行证据 |
+| [ARCHITECTURE.md](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/ARCHITECTURE.md) | 已由长文改成指向当前协议架构文档 | 不能用早期三层架构文档充当现行主权威 |
+| [architecture.mdx](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/content/docs/concepts/architecture.mdx) | 以协议分层解释 Data/System/UI/Automation/AI/Marketplace 及 ObjectQL/Kernel/ObjectUI 引擎视图 | 标题“四层”与所列六协议/三引擎需核对口径，不先推断矛盾已成立 |
+| [architecture-overview.mdx](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/content/docs/concepts/architecture-overview.mdx) | 声明 Zod→compiled artifact→runtime→REST/UI/MCP，提到 UI 来源曾在其他仓库 | 当前 Fork 包含 ui/，需查明是否迁入、子项目/构建源与叙述是否过期 |
+| [docs/NORTH-STAR.md](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/docs/NORTH-STAR.md) | 描述业务/AI 双用户与端到端应用验证目标 | 其中 Roadmap/Definition of Done 属上游作者目标，不等于已验证功能 |
+| [AGENTS.md](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/AGENTS.md) | 上游 AI 协作规则，包含构建、代码和开发纪律 | 与研究本身的目标不同；需用 research/AGENTS 区分 |
+| [packages/core/src/kernel.ts](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/packages/core/src/kernel.ts) | 存在插件生命周期、服务装配、降级启动信号等实现入口 | 必须追踪每个分支和真实调用者，不依据注释直接断言行为 |
+| [packages/objectql/src/engine.ts](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/packages/objectql/src/engine.ts) | 数据引擎入口包含查询、hook、事务及多类子模块 import | 跟踪数据写入、授权门禁、并发和错误语义 |
+| [packages/spec/src/data/object.zod.ts](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/packages/spec/src/data/object.zod.ts) | 对象 Schema 与字段、Action、分享范围等定义入口 | 概念声明与 ObjectQL/runtime 实现映射，识别无消费者声明 |
+| [examples/app-showcase/src/coverage.ts](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/examples/app-showcase/src/coverage.ts) | 功能元数据种类被标为 demonstrated 或 waived，存在显式缺口 | 测试是否覆盖真实 runtime；waived 的具体原因和追踪状态 |
+| [examples/README.md](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/examples/README.md) | Todo、CRM、Showcase、Embed ObjectQL 为本仓库示例；HotCRM 为外部仓库 | 业务设计与框架功能必须分开取证 |
+
+## 3. 当前重要问题（先登记、后查证）
+
+1. 架构资料各自的适用范围、最新状态与冲突：README、NORTH-STAR、architecture、architecture-overview 和 ADR 之间如何裁决？
+2. Fork 内 ui/ 的具体来源与构建接入方式，和 overview “UI source outside repo” 表述如何对齐？
+3. 展示样例 demonstrated/waived 所对应的真实调用者、测试覆盖及运行能力是什么？
+4. Object Schema、权限/Policy、Action、Flow、MCP 是否在所有入口执行同一契约？哪些是不同同名语义？
+5. 完整 CRM 业务设计需要另取 HotCRM 固定快照；不能用 app-crm 小示例代替。
+6. 用户既有 DES-ARC/SEM 正式最新文件尚未在本仓库提供，跨体系结论不得用历史 L0/L1 代替。
+
+## 4. 本轮实证完成界限
+
+已确认公开 Fork 仓库元数据、Git 树与少量直接源码。未执行本地命令、依赖安装、静态检查、CI、E2E、功能验证、角色/越权测试及性能实验。报告和任务状态必须沿用这个区分。
+
+## 5. 后续更新纪律
+
+- 更换基线先记录新 commit、差异、受影响结论，不直接覆盖旧结果。
+- 每新增一项关键判断，补充定位到 commit+源码范围或复现实验记录。
+- 有证据不足就记录“未知/待验证”，不得以目录名、文档宣称或模型经验填空。
