@@ -38,6 +38,11 @@
 5. 完整 CRM 业务设计需要另取 HotCRM 固定快照；不能用 app-crm 小示例代替。
 6. 用户既有 DES-ARC/SEM 正式最新文件尚未在本仓库提供，跨体系结论不得用历史 L0/L1 代替。
 
+## 3.1 对抗审查中新核实的两个源码边界（2026-11-15）
+
+- **功能“已展示”的证据强度**：[`examples/app-showcase/test/coverage.test.ts`](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/examples/app-showcase/test/coverage.test.ts) 存在元数据 registry 校核、对应文件存在性及 `waived` 必须提供 Issue 的测试；[`examples/app-showcase/src/coverage.ts`](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/examples/app-showcase/src/coverage.ts) 中 `picklist` 被标为 `waived`。这些静态代码事实不证明被 `demonstrated` 的所有能力已经端到端运行验证。
+- **Kernel 适用域**：[`content/docs/concepts/architecture.mdx`](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/content/docs/concepts/architecture.mdx) 声明请求通过 Kernel；[`examples/embed-objectql/README.md`](https://github.com/scbdzhwl/objectstack-analysis/blob/6c5d31fac7763e7aaebc5e853c17727698e8126a/examples/embed-objectql/README.md) 明确描述无需 Kernel 直接嵌入 ObjectQL 引擎。当前只能确认两种描述/形态存在；必须在实际实现和完整部署场景中核查授权、访问及数据边界，**不得直接认定越权漏洞，也不得无条件采信一条总述**。
+
 ## 4. 本轮实证完成界限
 
 已确认公开 Fork 仓库元数据、Git 树与少量直接源码。未执行本地命令、依赖安装、静态检查、CI、E2E、功能验证、角色/越权测试及性能实验。报告和任务状态必须沿用这个区分。
