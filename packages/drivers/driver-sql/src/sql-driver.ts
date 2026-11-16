@@ -175,7 +175,7 @@ import {
 // `previewTimeConvergence`): the read-only plan of what the deferred schema sync would do.
 // [#25521 cut 19] And the declared column DEFAULT emission (`nowColumnDefault`, `applyDeclaredColumnDefault`):
 // what a field's `defaultValue` becomes in the DDL of a fresh or rebuilt column.
-import { applyDeclaredColumnDefault, applyDriftOpInPlace, applyIndexDriftOp, applyMigrationEntries, applyMigrationEntriesKeepingDeferral, applyNullSafeUniquePreflight, applyPublishedColumnChanges, backfillCanonicalDatetimes, backfillCanonicalJsonEncoding, backfillCanonicalTimes, convergeJsonColumn, countNonTemporalTextRows, createNullSafeUniqueIndex, DEFERRED_DDL_LOCK_WAIT_TIMEOUT_SECONDS, detectManagedDrift, detectTableDrift, detectTableIndexDrift, ensureRotation, legacyMysqlTimeColumns, legacyMysqlTimestampColumns, nowColumnDefault, planMediaColumnMove, previewDatetimeConvergence, previewDeferredSchemaWork, previewTimeConvergence, rebuildSqliteTablePatched, reconcileAndWarnDrift, registerExternalObject, restoreBareIndexAfterFailedTighten, rotationColumnList, rotationShardKey, runWideningAlters, syncDeclaredIndexes, warnBuiltinColumnCollisions } from './sql-driver-schema-sync.js';
+import { applyDeclaredColumnDefault, applyDriftOpInPlace, applyIndexDriftOp, applyMigrationEntries, applyMigrationEntriesKeepingDeferral, applyNullSafeUniquePreflight, applyPublishedColumnChanges, backfillCanonicalDatetimes, backfillCanonicalJsonEncoding, backfillCanonicalTimes, convergeJsonColumn, countNonTemporalTextRows, createNullSafeUniqueIndex, DEFERRED_DDL_LOCK_WAIT_TIMEOUT_SECONDS, detectManagedDrift, detectTableDrift, detectTableIndexDrift, ensureRotation, legacyMysqlTimeColumns, legacyMysqlTimestampColumns, nowColumnDefault, planMediaColumnMove, previewDatetimeConvergence, previewDeferredSchemaWork, previewTimeConvergence, rebuildSqliteTablePatched, reconcileAndWarnDrift, registerExternalObject, relaxDeclaredNotNull, restoreBareIndexAfterFailedTighten, rotationColumnList, rotationShardKey, runWideningAlters, syncDeclaredIndexes, warnBuiltinColumnCollisions } from './sql-driver-schema-sync.js';
 import type { ConcurrentIndexDeferral } from './pg-concurrent-index.js';
 // [#25521 cut 11] The autonumber sequence path (`getNextSequenceValue`, `fillAutoNumberFields`,
 // `issueAutonumbers`, `maxAutonumberCounter`, and the #5495 collision re-seed `collidingAutoNumberReservations`
@@ -383,6 +383,16 @@ export class SqlDriver implements IDataDriver {
       // mode) opts out of the `beginTransaction()` it inherits from this class.
       // Absence would mean the same thing and say nothing.
       transactionsUnsupported: false,
+      // [#33698] `aggregate()` compiles a per-measure `aggregations[].filter`
+      // as a conditional aggregate (`fn(CASE WHEN (pred) THEN arg END)`), the
+      // predicate from the same where compiler a `where` goes through, so the
+      // engine sends filtered measures here instead of reading every row into
+      // memory. A subclass whose transport cannot run the compile (TursoDriver's
+      // remote mode answers `aggregate()` with 501) spreads this and turns it off.
+      // Declared on every dialect: text comparison in the filter is then the
+      // collation's, as for this datasource's `where` (the latitude the bit's
+      // TSDoc in `data/driver.zod.ts` states, measured dialects named there).
+      aggregationFilter: true,
     };
   }
 
@@ -4239,11 +4249,18 @@ export class SqlDriver implements IDataDriver {
   }
 
   /**
-   * Public Rotator entry point (called by the LifecycleService each sweep and
-   * by {@link initObjects} at boot). Idempotent: ensures the current shard +
-   * read view exist, adopts a legacy pre-rotation base table as the current
-   * shard, column-syncs every retained shard so the UNION stays uniform, and
-   * drops shards past the `shards × unit` window.
+   * Public Rotator entry point, called by the LifecycleService each sweep.
+   * Idempotent: ensures the current shard + read view exist, adopts a legacy
+   * pre-rotation base table as the current shard, column-syncs every retained
+   * shard so the UNION stays uniform, and drops shards past the
+   * `shards × unit` window.
+   *
+   * The only caller that drops. {@link initObjects} runs the same
+   * {@link ensureRotation} at boot with `dropExpired` false: a boot syncs its
+   * schema before it is judged (the organization-ownership guard refuses after
+   * the engine's sync), so a sync that dropped took a restored shard with the
+   * boot that refused to serve it. An expired shard stays in the read view
+   * until the first sweep of a served boot drops it here.
    */
   rotateShards(
     objectDef: { name: string; fields?: Record<string, any>; tenancy?: any; indexes?: any[]; lifecycle?: any },
@@ -4253,11 +4270,19 @@ export class SqlDriver implements IDataDriver {
     return RotationFacet.rotateShards.call(rotationHost.of(this), objectDef, nowMs);
   }
 
+  /**
+   * Inventory a rotation-managed table's shards, adopt a legacy base table,
+   * create the current shard, column-sync the live shards and rebuild the read
+   * view. With `dropExpired` (the Rotator's {@link rotateShards} only) shards
+   * past the `shards × unit` window are DROPPED and leave the view; without it
+   * (schema sync, {@link initObjects}) every shard stays, in the view.
+   */
   protected ensureRotation(
     tableName: string,
     obj: { name: string; fields?: Record<string, any>; tenancy?: any; indexes?: any[] },
     policy: { shards: number; unit: 'day' | 'week' | 'month' },
     nowMs?: number,
+    dropExpired: boolean = false,
   ): Promise<{ object: string; current: string; shards: string[]; dropped: string[] }> {
     // [#25521 cut 17] The body moved to `sql-driver-schema-sync.ts` (see `SchemaSyncHost`).
     const readKnex = () => this.knex;
@@ -4272,7 +4297,7 @@ export class SqlDriver implements IDataDriver {
       rotationShardKey: (...a) => this.rotationShardKey(...a),
       get rotationStateByTable() { return readRotationStateByTable(); },
     };
-    return ensureRotation.call(host, tableName, obj, policy, nowMs);
+    return ensureRotation.call(host, tableName, obj, policy, nowMs, dropExpired);
   }
 
   /**
@@ -5690,6 +5715,44 @@ export class SqlDriver implements IDataDriver {
       get logger() { return readLogger(); },
     };
     return applyPublishedColumnChanges.call(host, obj);
+  }
+
+  /**
+   * [#33724] Relax the NOT NULL of each named column whose field declares
+   * `storage: { notNull: false }` in words — the one `needs_confirm` entry
+   * {@link applyPublishedColumnChanges} also applies, and nothing else: no
+   * `safe` entry, no undeclared NOT NULL, no index, nothing `destructive`.
+   *
+   * A package install or upgrade calls it after its schema sync, naming the
+   * columns the INSTALLING package's own declaration relaxes
+   * (`@objectstack/cloud-connection`'s `relaxInstallDeclaredNotNull`), so a
+   * column another package or a customization declares is never touched by
+   * that install. A package object is sealed, so no publish of it can ask for
+   * the relax; its install is the deliberate act ADR-0113 D5 asks for, as a
+   * publish is for a runtime-authored object. It is NOT the boot's reconcile
+   * ({@link reconcileAndWarnDrift}) and reads neither `autoMigrate` nor
+   * `NODE_ENV`: a boot, rehydrate included, never applies it.
+   *
+   * `obj.name` is the physical table, as for {@link applyPublishedColumnChanges}.
+   *
+   * @returns the entries applied and those skipped (the dialect cannot perform
+   *   the op, or its DDL failed), which the install reports.
+   */
+  relaxDeclaredNotNull(
+    obj: { name: string; fields?: Record<string, any>; indexes?: any[] },
+    columns: Iterable<string>,
+    opts?: { packageId?: string },
+  ): Promise<{ applied: ManagedDriftEntry[]; skipped: ManagedDriftEntry[] }> {
+    // The body is in `sql-driver-schema-sync.ts` (see `SchemaSyncHost`).
+    const readDeferredDdl = () => this.deferredDdl;
+    const readLogger = () => this.logger;
+    const host: ThisParameterType<typeof relaxDeclaredNotNull> = {
+      applyMigrationEntries: (...a) => this.applyMigrationEntries(...a),
+      get deferredDdl() { return readDeferredDdl(); },
+      detectManagedDrift: (...a) => this.detectManagedDrift(...a),
+      get logger() { return readLogger(); },
+    };
+    return relaxDeclaredNotNull.call(host, obj, columns, opts);
   }
 
   /**

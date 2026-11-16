@@ -6,18 +6,29 @@
  *
  * A hosted environment is managed (the maintainer's ruling on
  * objectstack-ai/cloud#3132, cloud ADR-0024 D5.2, mirrored here as ADR-0135
- * D5.2): the organisation that hosts it invites its people in the cloud, their
- * accounts arrive through the cloud's identity provider, and authorization —
+ * D5.2): its people sign in through the hosting organisation's identity
+ * provider — added ahead of their first sign-in in Setup → Users as pending
+ * people (#33181, `pending-sso-users.ts`), or arriving on it — and authorization —
  * positions, permission sets — stays in the environment. Whether this process
  * is one is `isCloudManaged()` from `@objectstack/core` (`OS_CLOUD_MANAGED=1`
  * on the cloud's containers); every door below asks it and nothing else.
  * Self-hosted deployments never set the variable, so there every door answers
  * exactly as it did before.
  *
- * The doors split by POPULATION, never switched off wholesale (ADR-0135 D5.2):
- * a password can still be set on a local (`env_native`) account, and a
- * platform administrator can still give themselves a local password, so the
- * break-glass administrator stays reachable when the identity provider is not.
+ * Every door that sets a local password is closed to everyone. A hosted
+ * environment sets no local password for anyone and has no local break-glass
+ * administrator (ruling 10 of objectstack-ai/cloud#4465, recorded on
+ * objectstack#33203): `admin/set-user-password` refuses every target, an
+ * `env_native` row included; `set-initial-password` refuses every signed-in
+ * caller, a platform administrator included; and the two self-service reset
+ * doors (`/reset-password`, `/phone-number/reset-password`, each of which
+ * creates the credential when the user holds none) refuse every request, with
+ * the two doors that send their link or code (`/request-password-reset`,
+ * `/phone-number/request-password-reset`), so nobody is sent a link the reset
+ * door would refuse. A password set before stays where it is (changing one is
+ * `/change-password`'s, objectstack-ai/cloud#4471). ADR-0135 D5.2's
+ * break-glass clause, which kept a local credential reachable by population,
+ * holds on self-hosted deployments only.
  *
  * Every refusal is `409 RESOURCE_CONFLICT`, no code minted — the answer
  * cloud-connection's platform-managed doors give, on the same rule: the
@@ -35,30 +46,43 @@ export const CLOUD_MANAGED_REFUSAL_STATUS = 409;
 
 /** One message per door, keyed by the door. */
 export const CLOUD_MANAGED_REFUSAL_MESSAGES = {
+  // [#33181] The four sentences below point to Setup → Users, where a
+  // managed environment now adds a person (`admin/add-sso-user`,
+  // `admin/import-sso-users`): the person signs in through the hosting
+  // organisation's identity provider. Kept together so the wording can be
+  // swapped in one place.
   invitation:
-    'This environment is cloud-managed: the people who use it are invited by the organisation that hosts it, in the cloud, '
-    + 'so an invitation cannot be created here. Invite them from the organisation in the cloud console; their account '
-    + 'arrives on their first sign-in. No invitation was created.',
+    'This environment is cloud-managed: the people who use it sign in through the identity provider of the organisation '
+    + 'that hosts it, so an invitation cannot be created here. Add them in Setup → Users instead; they sign in through '
+    + 'that identity provider. No invitation was created.',
   // [#27843] `sys_invitation.copy_invitation_link`: the invitation's accept
-  // link, which the hosting organisation's cloud invitation replaces here.
+  // link, which adding the person in Setup → Users replaces here.
   invitationLink:
-    'This environment is cloud-managed: the people who use it are invited by the organisation that hosts it, in the cloud, '
-    + 'so an invitation link is not handed out here. Invite them from the organisation in the cloud console; their account '
-    + 'arrives on their first sign-in. No link was returned.',
+    'This environment is cloud-managed: the people who use it sign in through the identity provider of the organisation '
+    + 'that hosts it, so an invitation link is not handed out here. Add them in Setup → Users instead; they sign in '
+    + 'through that identity provider. No link was returned.',
   createUser:
-    'This environment is cloud-managed: its users are invited by the organisation that hosts it, in the cloud, so a '
-    + 'local user cannot be created here. Invite the person from the organisation in the cloud console; their account '
-    + 'arrives on their first sign-in. No user was created.',
+    'This environment is cloud-managed: its users sign in through the identity provider of the organisation that hosts '
+    + 'it, so a user with a local password cannot be created here. Add the person in Setup → Users instead; they sign '
+    + 'in through that identity provider. No user was created.',
   importUsers:
-    'This environment is cloud-managed: its users are invited by the organisation that hosts it, in the cloud, so users '
-    + 'cannot be imported here. Invite them from the organisation in the cloud console. No user was imported.',
+    'This environment is cloud-managed: its users sign in through the identity provider of the organisation that hosts '
+    + 'it, so users with local passwords cannot be imported here. Import them in Setup → Users instead; they sign in '
+    + 'through that identity provider. No user was imported.',
   setUserPassword:
-    "This environment is cloud-managed and this user signs in through the hosting organisation's identity provider, so "
-    + 'their password is managed there. A password can be set here only on a local account (source env_native), such '
-    + 'as the break-glass administrator. No password was changed.',
+    "This environment is cloud-managed: everyone who uses it signs in through the hosting organisation's identity "
+    + 'provider, and no local password is set here for anyone, an administrator included. No password was changed.',
   setInitialPassword:
-    "This environment is cloud-managed: you sign in through the hosting organisation's identity provider, and a local "
-    + "password here is reserved for a platform administrator's break-glass access. No password was set.",
+    "This environment is cloud-managed: you sign in through the hosting organisation's identity provider, and no "
+    + 'local password is set here for anyone, an administrator included. No password was set.',
+  // [#33203] `/reset-password` and `/phone-number/reset-password`.
+  resetPassword:
+    "This environment is cloud-managed: you sign in through the hosting organisation's identity provider, and no "
+    + 'local password is set or reset here for anyone, an administrator included. No password was set.',
+  // [#33203] `/request-password-reset` and `/phone-number/request-password-reset`.
+  requestPasswordReset:
+    "This environment is cloud-managed: you sign in through the hosting organisation's identity provider, and no "
+    + 'local password is set or reset here for anyone, an administrator included. No reset link or code was sent.',
 } as const;
 
 /** The doors a cloud-managed environment narrows. */

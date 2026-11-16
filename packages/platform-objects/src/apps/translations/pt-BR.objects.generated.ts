@@ -120,7 +120,8 @@ export const ptBRObjects: NonNullable<TranslationData['objects']> = {
         help: "Como esta identidade foi criada — idp_provisioned (SSO federado JIT) ou env_native (cadastro local / usuário final do app). Gerenciado pelo sistema; não edite.",
         options: {
           idp_provisioned: "Provisionado pelo IdP",
-          env_native: "Conta local"
+          env_native: "Conta local",
+          idp_pending: "Pending SSO Sign-In"
         }
       },
       id: {
@@ -214,6 +215,54 @@ export const ptBRObjects: NonNullable<TranslationData['objects']> = {
             "user.phoneNumber": "Número de telefone",
             permissionSet: "Conjunto de permissões",
             temporaryPassword: "Senha temporária: copie-a agora, ela é mostrada apenas uma vez e nunca é armazenada"
+          }
+        }
+      },
+      add_sso_user: {
+        label: "Adicionar usuário",
+        description: "Adicione alguém pelo endereço de e-mail antes do primeiro login. A pessoa entra pelo provedor de identidade da sua organização; nenhuma senha é definida aqui.",
+        params: {
+          positions: {
+            label: "Cargo",
+            helpText: "Opcional. O cargo que esta pessoa ocupa desde o momento em que é adicionada."
+          },
+          permissionSets: {
+            label: "Conjunto de permissões",
+            helpText: "Opcional. Concede este conjunto de permissões à pessoa, para que ela possa abrir seus aplicativos no primeiro login."
+          },
+          manager: {
+            label: "E-mail do gestor",
+            helpText: "Opcional. O endereço de e-mail do gestor desta pessoa, um usuário deste ambiente."
+          }
+        },
+        resultDialog: {
+          title: "Usuário adicionado",
+          acknowledge: "Concluído",
+          fields: {
+            email: "E-mail",
+            notApplied: "Já pendente, então não aplicado (defina no registro)",
+            managerError: "Gestor",
+            "host.reason": "Convite não enviado"
+          }
+        }
+      },
+      import_sso_users: {
+        label: "Importar usuários",
+        description: "Adicione várias pessoas de uma vez a partir de texto CSV. Cada linha é adicionada separadamente, então uma linha com erro falha sozinha. Elas entram pelo provedor de identidade da sua organização; nenhuma senha é definida aqui.",
+        params: {
+          csv: {
+            label: "CSV",
+            helpText: "Uma linha de cabeçalho e depois uma pessoa por linha, no máximo 500. Colunas: email, name, positions e permission_sets (nomes de máquina separados por ;) e manager_id (o endereço de e-mail do gestor)."
+          }
+        },
+        resultDialog: {
+          title: "Importação concluída",
+          acknowledge: "Concluído",
+          fields: {
+            "summary.added": "Adicionados",
+            "summary.alreadyPending": "Já pendentes, avisados novamente",
+            "summary.failed": "Não adicionados",
+            rows: "Resultado por linha"
           }
         }
       },
@@ -400,7 +449,7 @@ export const ptBRObjects: NonNullable<TranslationData['objects']> = {
   sys_session: {
     label: "Sessão",
     pluralLabel: "Sessões",
-    description: "Sessões de usuário ativas",
+    description: "Sessões de usuário",
     fields: {
       user_id: {
         label: "Usuário"
@@ -2167,6 +2216,18 @@ export const ptBRObjects: NonNullable<TranslationData['objects']> = {
             label: "URL de descoberta",
             helpText: "Opcional. URL do documento de descoberta OIDC (https). Deixe em branco para derivar `<issuer>/.well-known/openid-configuration`. Um endpoint informado aqui é considerado confiável para este provedor."
           },
+          authorizationEndpoint: {
+            label: "Authorization URL",
+            helpText: "Optional. OIDC authorization endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names an authorization host the server does not trust."
+          },
+          tokenEndpoint: {
+            label: "Token URL",
+            helpText: "Optional. OIDC token endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a token host the server does not trust. Google: https://oauth2.googleapis.com/token"
+          },
+          jwksEndpoint: {
+            label: "JWKS URL",
+            helpText: "Optional. URL of the IdP’s signing-key set (JWKS, https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a key-set host the server does not trust. Google: https://www.googleapis.com/oauth2/v3/certs"
+          },
           userInfoEndpoint: {
             label: "URL de userinfo",
             helpText: "Opcional. URL do endpoint userinfo do OIDC (https), usada no lugar da indicada pelo documento de descoberta. Um endpoint informado aqui é considerado confiável para este provedor: informe-o quando o registro for recusado porque o documento de descoberta indica um host de userinfo em que o servidor não confia."
@@ -2253,6 +2314,11 @@ export const ptBRObjects: NonNullable<TranslationData['objects']> = {
             label: "Mapear: atributo de grupos",
             helpText: "Opcional. Atributo da asserção que contém os grupos do usuário. Cada login concede os conjuntos de permissões mapeados para esses grupos. Deixe em branco para não mapear grupos.",
             placeholder: "groups"
+          },
+          mapAccountKey: {
+            label: "Map: Account key attribute",
+            helpText: "Optional. Assertion attribute with one stable value per person that the IdP sets and the user cannot edit (Entra ID object id, Okta user id; never an email, name or other attribute a user can change), used as the account key instead of the NameID, so a sign-in from your sign-in page and one from the IdP’s app portal reach the same account, and an email change keeps it. Leave blank for the default: Microsoft Entra ID (IdP Entity ID on sts.windows.net or login.microsoftonline.com) uses http://schemas.microsoft.com/identity/claims/objectidentifier, every other IdP the NameID. Set it when the provider is registered: accounts already made keep the key they were made with.",
+            placeholder: "http://schemas.microsoft.com/identity/claims/objectidentifier"
           }
         }
       },

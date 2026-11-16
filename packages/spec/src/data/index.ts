@@ -130,6 +130,12 @@ export * from './filter-number-comparand-declared-type';
 // seam, and any other string is refused with INVALID_FILTER 400. The engine
 // door is objectql's; this module is the contract only.
 export * from './filter-boolean-comparand-declared-type';
+// [#29486] The STRING-STORED twin of the two doors above — the contract half of
+// the maintainer's ruling: a number or boolean comparand against a declared
+// text- or option-family field is narrowed to String(value), the form the write
+// door stores, at the engine's field-aware seam. It never refuses. The engine
+// arm is objectql's; this module is the contract only.
+export * from './filter-string-stored-comparand-declared-type';
 export * from './temporal-conformance';
 // Canonical conformance cases for deterministic paged reads — the standard
 // every driver's `find()` is held to whenever `limit`/`offset` slice the result
@@ -416,6 +422,12 @@ export * from './injected-system-column-provenance';
 // v18 stored-row listing and `@objectstack/lint`, and exported so a producer
 // that writes `controlled_by_parent` asks the spec instead of restating it.
 export * from './controlled-by-parent-master';
+
+// [ADR-0055 §1 as amended · ruling A] `defineStack`'s record that an author
+// omitted `required` on a `controlled_by_parent` object's `master_detail` —
+// the parse has already written `false` there. Only the reader is published;
+// `@objectstack/lint` reads it to report the omitted spelling.
+export { masterDetailRequiredOmitted } from './master-detail-required-omission';
 
 // record-currency path refusals (ADR-0144 D2/D6, amended) — the one wording of
 // "segment 2 of a `PARENT_FIELD.CODE_FIELD` path names no code field" and of a

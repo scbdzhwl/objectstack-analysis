@@ -377,6 +377,10 @@ export const enMetadataForms: NonNullable<TranslationData['metadataForms']> = {
         label: "Owner may edit",
         helpText: "On: the owner of a detail row (its owner_id) may update that row by id with read access to the master; everyone else, and every insert, delete, multi-row update and on-behalf-of write, still needs edit access to the master. Off (the default): every write of a detail needs edit access to its master."
       },
+      "sharing.controlledByParent.writeRequiresMasterRead": {
+        label: "Read on master is enough to write",
+        helpText: "On: anyone who can read the master may insert, update and delete detail rows, as the detail's own permissions, row-level security and field-level security allow. Off (the default): every write of a detail needs edit access to its master. Do not turn on together with Owner may edit, which this already covers."
+      },
       access: {
         label: "Access",
         helpText: "Wildcard-grant posture (ADR-0066 D2). Absent resolves to public. It decides whether a permission set's '*' object grant covers this object; record visibility between users is sharingModel."
@@ -963,15 +967,27 @@ export const enMetadataForms: NonNullable<TranslationData['metadataForms']> = {
       },
       refusals: {
         label: "Refusals",
-        helpText: "Refusal catalogue, keyed by the SCREAMING_SNAKE code the body throws (e.g. CLEAN_VERSION_REQUIRED). The caller reads the declared message, translated into their language, with the declared status. JavaScript (L2) bodies only"
+        helpText: "Refusal catalogue, keyed by the SCREAMING_SNAKE code the hook throws (e.g. CLEAN_VERSION_REQUIRED). The caller reads the declared message, translated into their language, with the declared status. For a JavaScript (L2) body or a handler; refused on an expression body"
       },
       "refusals.message": {
         label: "Message",
-        helpText: "The sentence the user reads when the body throws this code — plain text, with no placeholders"
+        helpText: "The sentence the user reads when the body throws this code. Plain text, unless the entry declares params: then a {{ name }} hole fills a declared param"
       },
       "refusals.status": {
         label: "Status",
         helpText: "HTTP status of the refusal (400–499). Absent: 400"
+      },
+      "refusals.reasons": {
+        label: "Reasons",
+        helpText: "Further sentences under this same code, keyed by the snake_case reason the body throws beside the code ({ code, reason }). The wire code and status stay this entry's; a reason not declared here is refused. Absent: a thrown reason is not read"
+      },
+      "refusals.reasons.message": {
+        label: "Message",
+        helpText: "The sentence the user reads when the body throws this reason under the code. Its {{ }} holes follow the entry's params"
+      },
+      "refusals.params": {
+        label: "Params",
+        helpText: "Names the sentences may fill (e.g. state): the body throws { code, params: { state } }, and a {{ state }} hole renders it. Absent: the sentences are plain text"
       },
       handler: {
         label: "Handler",

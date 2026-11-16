@@ -377,6 +377,10 @@ export const zhHantMetadataForms: NonNullable<TranslationData['metadataForms']> 
         label: "擁有者可編輯",
         helpText: "開啟：子記錄的擁有者（其 owner_id）只要對父記錄有讀權限，就可以依 id 更新該列；其他人，以及所有新增、刪除、多列更新和代辦寫入，仍需要對父記錄的編輯權限。關閉（預設）：子記錄的每一次寫入都需要對其父記錄的編輯權限。"
       },
+      "sharing.controlledByParent.writeRequiresMasterRead": {
+        label: "可讀父記錄即可寫入",
+        helpText: "開啟：凡能讀取父記錄的人，都可以在子物件自身的權限、列層級安全和欄位層級安全允許的範圍內，新增、更新和刪除子記錄。關閉（預設）：子記錄的每一次寫入都需要對其父記錄的編輯權限。不要與「擁有者可編輯」同時開啟，本開關已涵蓋它。"
+      },
       access: {
         label: "存取策略",
         helpText: "通配授權策略（ADR-0066 D2）。不宣告時依 public 處理。它決定權限集的 '*' 物件授權是否覆蓋本物件；使用者之間的記錄可見性由 sharingModel 決定。"
@@ -963,15 +967,27 @@ export const zhHantMetadataForms: NonNullable<TranslationData['metadataForms']> 
       },
       refusals: {
         label: "拒絕目錄",
-        helpText: "拒絕目錄，以內文丟擲的 SCREAMING_SNAKE 錯誤碼為鍵（例如 CLEAN_VERSION_REQUIRED）。呼叫方讀到宣告的提示語（依其語言翻譯）和宣告的狀態碼。僅適用於 JavaScript（L2）內文"
+        helpText: "拒絕目錄，以掛鉤丟擲的 SCREAMING_SNAKE 錯誤碼為鍵（例如 CLEAN_VERSION_REQUIRED）。呼叫方讀到宣告的提示語（依其語言翻譯）和宣告的狀態碼。適用於 JavaScript（L2）內文或處理器；運算式內文宣告會被拒絕"
       },
       "refusals.message": {
         label: "提示語",
-        helpText: "內文丟擲此錯誤碼時使用者讀到的句子——純文字，不含預留位置"
+        helpText: "內文丟擲此錯誤碼時使用者讀到的句子。純文字；若該條目宣告了參數，則 {{ name }} 預留位置填入一個已宣告的參數"
       },
       "refusals.status": {
         label: "狀態碼",
         helpText: "拒絕的 HTTP 狀態碼（400–499）。不填：400"
+      },
+      "refusals.reasons": {
+        label: "原因",
+        helpText: "同一錯誤碼下的更多句子，以內文在錯誤碼旁丟擲的 snake_case 原因為鍵（{ code, reason }）。線上的錯誤碼和狀態碼仍取本條目的；未在此宣告的原因會被拒絕。不填：丟擲的原因不被讀取"
+      },
+      "refusals.reasons.message": {
+        label: "提示語",
+        helpText: "內文在此錯誤碼下丟擲此原因時使用者讀到的句子。其中的 {{ }} 預留位置遵循本條目的參數"
+      },
+      "refusals.params": {
+        label: "參數",
+        helpText: "句子可填入的名稱（例如 state）：內文丟擲 { code, params: { state } }，{{ state }} 預留位置即顯示該值。不填：句子為純文字"
       },
       handler: {
         label: "處理器",

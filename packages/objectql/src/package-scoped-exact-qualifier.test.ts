@@ -972,6 +972,105 @@ describe('[#31699 F2] a pair member row two holders could own is refused on both
       expect(labelOf(await read(PAIR, 'fr-FR'))).toBe('pair fr-FR');
     });
 
+    // [#32606] A row of the App's pair declaring X is X's (its declared
+    // override of an added member, #28802), served at X's address and in X's
+    // lists. The moved-edit rule (#31593, `isMovedOverrideRowOf`) asked
+    // whether X still ships the item at the MEMBER's grain, so beside an
+    // addition Z that ships the row's locale (`fr-FR`) while X ships only
+    // `en-US`, it read the row as an edit that moved from X to Z: Z's exact
+    // address, Z's list and the execution list a send resolved to Z reads all
+    // served the row declared for X, stamped Z, while the registry answers
+    // Z's own. One row at two packages' addresses (red line 2). X ships the
+    // name, so it is still the row's holder: the former owner is asked at the
+    // name's grain, and Z answers its own member everywhere.
+    const declaredForX = () => {
+      pairRow({ overrides: { package: X } });
+      registry.registerItem('email_template', {
+        name: 'welcome', label: 'pair fr-FR', locale: 'fr-FR', subject: 'pair fr-FR', bodyHtml: '<p>p</p>', overrides: { package: X }, _packageId: PAIR, _provenance: 'org',
+      }, 'name' as never);
+    };
+    it.each([
+      ['addition installed first', () => { installZ(); tpl('en-US', X); tpl('fr-FR', Z); declaredForX(); }],
+      ['row stored first', () => { tpl('en-US', X); declaredForX(); installZ(); tpl('fr-FR', Z); }],
+    ] as const)('[#32606] NARROWING — a row declared for X is never served at an addition Z that ships its locale (%s; BASE: Z\'s address, list and execution list served `pair fr-FR` stamped Z)', async (_order, arrange) => {
+      arrange();
+      expect(registry.getPackageScopedItem<{ label: string }>('email_template', 'welcome', Z, 'fr-FR')?.label, 'the registry at Z').toBe('zeta fr-FR');
+      const atZ = await read(Z, 'fr-FR');
+      expect(labelOf(atZ), '`?package=Z&member=fr-FR`: Z\'s own').toBe('zeta fr-FR');
+      expect((atZ as { item?: { _diagnostics?: { valid?: boolean } } })?.item?._diagnostics?.valid, 'Z\'s own item is valid').toBe(true);
+      expect(await listed(Z), 'Z\'s list').toEqual(['zeta fr-FR']);
+      expect(await forSend(Z), 'Z\'s execution list').toEqual(['zeta fr-FR']);
+      expect((await protocol.listServedOverrides({ packageId: Z })).map((e) => `${e.name}:${e.member}`), 'Z\'s customizations').toEqual([]);
+      expect((await protocol.listServedOverrides({ packageId: X })).map((e) => `${e.name}:${e.member}`), 'X\'s customizations').toEqual(['welcome:fr-FR']);
+      // CONTROL: X's address and X's lists serve the row declared for X (UNCHANGED).
+      expect(labelOf(await read(X, 'fr-FR'))).toBe('pair fr-FR');
+      expect(await listed(X)).toEqual(['pair fr-FR', 'suitex en-US']);
+      expect(await forSend(X)).toEqual(['pair fr-FR', 'suitex en-US']);
+      expect(labelOf(await read(PAIR, 'fr-FR'))).toBe('pair fr-FR');
+    });
+
+    // [#32849, ADR-0146 D8 item 2] A row of the App's pair declaring Z, for
+    // the very locale Z adds to X's template, is Z's declared override:
+    // `?package=Z`, Z's lists and the registry's slot at Z serve it. The read
+    // naming no package took its content from the name's shippers (X and Z)
+    // and the row's binding (the pair, no shipper), so it answered the
+    // package-unbound row alone and served Z's shipped `fr-FR`, dropping the
+    // declared override. Now it reads the member at its one shipper, Z.
+    const declaredForZ = () => {
+      pairRow({ overrides: { package: Z } });
+      registry.registerItem('email_template', {
+        name: 'welcome', label: 'pair fr-FR', locale: 'fr-FR', subject: 'pair fr-FR', bodyHtml: '<p>p</p>', overrides: { package: Z }, _packageId: PAIR, _provenance: 'org',
+      }, 'name' as never);
+    };
+    const bareRead = (member: string, face: 'served' | 'execution' = 'served') =>
+      (face === 'served' ? protocol.getMetaItem : protocol.getMetaItemForExecution).call(protocol, {
+        type: 'email_template', name: 'welcome', member,
+      } as never) as Promise<{ item?: { label?: string; _packageId?: string }; packageId?: string } | undefined>;
+    it.each([
+      ['addition installed first', () => { installZ(); tpl('en-US', X); tpl('fr-FR', Z); declaredForZ(); }],
+      ['row stored first', () => { tpl('en-US', X); declaredForZ(); installZ(); tpl('fr-FR', Z); }],
+    ] as const)('[#32849] the bare member read serves the pair\'s declared override of an addition Z\'s own locale, as Z\'s address does (%s; BASE: served `zeta fr-FR`)', async (_order, arrange) => {
+      arrange();
+      expect(labelOf(await read(Z, 'fr-FR')), 'CONTROL: `?package=Z&member=fr-FR` serves the override (UNCHANGED)').toBe('pair fr-FR');
+      const bare = await bareRead('fr-FR');
+      expect([bare?.item?.label, bare?.item?._packageId, bare?.packageId], 'bare `?member=fr-FR`').toEqual(['pair fr-FR', Z, Z]);
+      const forExecution = await bareRead('fr-FR', 'execution');
+      expect([forExecution?.item?.label, forExecution?.item?._packageId], 'the bare execution read').toEqual(['pair fr-FR', Z]);
+      // CONTROL: X's own member is untouched by the override of Z's.
+      expect((await bareRead('en-US'))?.item?.label).toBe('suitex en-US');
+    });
+
+    it.each([
+      ['no row stored', () => { installZ(); tpl('en-US', X); tpl('fr-FR', Z); }],
+      ['an undeclared pair row of the locale', () => { installZ(); tpl('en-US', X); tpl('fr-FR', Z); pairRow(); hydratePairRow(); }],
+    ] as const)('[#32849] CONTROL — no override of Z declared (%s): the bare member read serves Z\'s own `fr-FR` (UNCHANGED)', async (_order, arrange) => {
+      arrange();
+      const bare = await bareRead('fr-FR');
+      expect([bare?.item?.label, bare?.packageId]).toEqual(['zeta fr-FR', Z]);
+      expect((await bareRead('fr-FR', 'execution'))?.item?.label).toBe('zeta fr-FR');
+    });
+
+    it('[#32849] CONTROL — the row declares X (the #32606 shape): the bare member read is not moved to Z, and keeps its refusal naming both (UNCHANGED)', async () => {
+      installZ(); tpl('en-US', X); tpl('fr-FR', Z); declaredForX();
+      const err = await refusalOf(() => bareRead('fr-FR'));
+      expect([err.code, err.status, err.refusal.candidates.map((c) => (c as { packageId?: string }).packageId).sort()])
+        .toEqual(['RESOURCE_CONFLICT', 409, [X, Z].sort()]);
+    });
+
+    // [#31593] CONTROL — the moved edit still follows its item: X ships
+    // nothing of the name any more (no member), so the row declaring X is
+    // the tenant's edit of the item that moved to Z, served at Z.
+    it.each([
+      ['addition installed first', () => { installZ(); tpl('fr-FR', Z); declaredForX(); }],
+      ['row stored first', () => { declaredForX(); installZ(); tpl('fr-FR', Z); }],
+    ] as const)('[#32606] CONTROL — X ships nothing of the name: the row declaring X is the moved edit, served at Z (%s; UNCHANGED)', async (_order, arrange) => {
+      arrange();
+      expect(labelOf(await read(Z, 'fr-FR'))).toBe('pair fr-FR');
+      expect(await listed(Z)).toEqual(['pair fr-FR']);
+      expect(await forSend(Z)).toEqual(['pair fr-FR']);
+      expect((await protocol.listServedOverrides({ packageId: Z })).map((e) => `${e.name}:${e.member}`)).toEqual(['welcome:fr-FR']);
+    });
+
     it('NARROWING — an undeclared row while another App\'s pair stores an undeclared row of the name: neither address serves it, as the registry binds neither (residual 2, contract review F6; BASE at 075fb3188: `?package=Y` served es-ES, `?package=P` fr-FR)', async () => {
       // App B: P ships en-US, Q (on P) ships de-DE; B's pair stores an undeclared fr-FR row.
       // App A: U (on A and P, A's namespace) ships fr-FR, Y ships it-IT; A's pair stores an undeclared es-ES row.
@@ -1070,8 +1169,11 @@ describe('[#31699 F2] a pair member row two holders could own is refused on both
     // App's undeclared de-DE pair row is X's member on X's address, as on
     // main. Counting composite slots only leaves X out, the row binds to the
     // pair, and X's address would lose it: ablation.
+    // [#33131 item 5] X's list and execution list count X's holding the same
+    // way, so they carry the member the exact read serves (FROM: they left it
+    // out when X held the name through its stored row alone).
     for (const holding of ['its own stored row in the bare slot', 'CONTROL: its composite slot'] as const) {
-      it.each([['holding first', true], ['pair row first', false]] as const)(`${holding === 'CONTROL: its composite slot' ? 'CONTROL' : 'UNCHANGED'} — X holds the name through ${holding} (%s): X's address and lists keep the App's undeclared pair row`, async (_order, holdingFirst) => {
+      it.each([['holding first', true], ['pair row first', false]] as const)(`${holding === 'CONTROL: its composite slot' ? 'CONTROL' : '[#33131] exact read UNCHANGED, lists now agree'} — X holds the name through ${holding} (%s): X's address and lists keep the App's undeclared pair row`, async (_order, holdingFirst) => {
         const xEn = { name: 'welcome', label: 'suitex en-US', locale: 'en-US', subject: 'suitex en-US', bodyHtml: '<p>x</p>' };
         const pairDe = { name: 'welcome', label: 'pair de-DE', locale: 'de-DE', subject: 'pair de-DE', bodyHtml: '<p>p</p>' };
         const registerHolding = () => {
@@ -1087,15 +1189,79 @@ describe('[#31699 F2] a pair member row two holders could own is refused on both
         expect(registry.overlayRowBinding('email_template', 'welcome', { ...pairDe, _packageId: PAIR }), 'the adoption counts X as the exact read does').toBe(X);
         expect(labelOf(await read(X, 'de-DE'))).toBe('pair de-DE');
         expect(labelOf(await read(X, 'en-US'))).toBe('suitex en-US');
-        // The lists are pinned for the composite slot only: with X holding through its stored row alone, X's
-        // lists leave the row out on main and here alike (the list door's own count, outside this card).
-        if (holding === 'CONTROL: its composite slot') {
-          expect(await listed(X)).toContain('pair de-DE');
-          expect(await forSend(X)).toContain('pair de-DE');
-        }
+        // [#33131 item 5] …and X's list and execution list carry it, through either holding: the list counts
+        // X's holding as the exact read does (FROM, with X holding through its stored row alone: both lists
+        // were `['suitex en-US']`, the exact read serving a member its lists left out).
+        expect(await listed(X)).toEqual(['pair de-DE', 'suitex en-US']);
+        expect(await forSend(X)).toEqual(['pair de-DE', 'suitex en-US']);
       });
     }
 
+    // [#33131 item 5] The list's widened count is the exact read's: a second holder of the name, or a row that
+    // declares another base, still leaves the row out of X's list, as X's exact read refuses or declines it.
+    it.each([['holding first', true], ['pair row first', false]] as const)('[#33131] CONTROL — X holds the name through its own stored row beside a second holder Y (%s): X\'s exact read refuses the undeclared pair row naming both, and X\'s lists leave it out', async (_order, holdingFirst) => {
+      const xEn = { name: 'welcome', label: 'suitex en-US', locale: 'en-US', subject: 'suitex en-US', bodyHtml: '<p>x</p>' };
+      const pairDe = { name: 'welcome', label: 'pair de-DE', locale: 'de-DE', subject: 'pair de-DE', bodyHtml: '<p>p</p>' };
+      const registerHolding = () => {
+        rows.push({ id: 'row_x', type: 'email_template', name: 'welcome', state: 'active', package_id: X, bundle_member: 'en-US', metadata: JSON.stringify(xEn) });
+        registry.registerItem('email_template', { ...xEn, _packageId: X, _provenance: 'org' }, 'name' as never);
+        tpl('en-US', Y);
+      };
+      const registerPairRow = () => {
+        rows.push({ id: 'row_de', type: 'email_template', name: 'welcome', state: 'active', package_id: PAIR, bundle_member: 'de-DE', metadata: JSON.stringify(pairDe) });
+        registry.registerItem('email_template', { ...pairDe, _packageId: PAIR, _provenance: 'org' }, 'name' as never);
+      };
+      if (holdingFirst) { registerHolding(); registerPairRow(); } else { registerPairRow(); registerHolding(); }
+      const err = await refusalOf(() => read(X, 'de-DE'));
+      expect([err.status, err.refusal.candidates.map((c) => (c as { packageId?: string }).packageId).sort()]).toEqual([409, [X, Y]]);
+      expect(await listed(X)).toEqual(['suitex en-US']);
+      expect(await forSend(X)).toEqual(['suitex en-US']);
+    });
+
+    it.each([['holding first', true], ['pair row first', false]] as const)('[#33131] CONTROL — X holds the name through its own stored row, and the pair row declares Y (%s): neither X\'s exact read nor X\'s lists serve it', async (_order, holdingFirst) => {
+      const xEn = { name: 'welcome', label: 'suitex en-US', locale: 'en-US', subject: 'suitex en-US', bodyHtml: '<p>x</p>' };
+      const pairDe = { name: 'welcome', label: 'pair de-DE', locale: 'de-DE', subject: 'pair de-DE', bodyHtml: '<p>p</p>', overrides: { package: Y } };
+      const registerHolding = () => {
+        rows.push({ id: 'row_x', type: 'email_template', name: 'welcome', state: 'active', package_id: X, bundle_member: 'en-US', metadata: JSON.stringify(xEn) });
+        registry.registerItem('email_template', { ...xEn, _packageId: X, _provenance: 'org' }, 'name' as never);
+      };
+      const registerPairRow = () => {
+        rows.push({ id: 'row_de', type: 'email_template', name: 'welcome', state: 'active', package_id: PAIR, bundle_member: 'de-DE', metadata: JSON.stringify(pairDe) });
+        registry.registerItem('email_template', { ...pairDe, _packageId: PAIR, _provenance: 'org' }, 'name' as never);
+      };
+      if (holdingFirst) { registerHolding(); registerPairRow(); } else { registerPairRow(); registerHolding(); }
+      let atX: unknown;
+      try { atX = labelOf(await read(X, 'de-DE')); } catch (e) { atX = (e as { status?: number }).status; }
+      expect(atX).not.toBe('pair de-DE');
+      expect(await listed(X)).toEqual(['suitex en-US']);
+      expect(await forSend(X)).toEqual(['suitex en-US']);
+    });
+
+  });
+
+  // [#33131 item 4, ruling 6868829990 = A] A pair row declaring a module X of
+  // the App that ships nothing of the name, while another module W of the App
+  // ships the member, is read as a tenant's edit of an item that moved from X
+  // to W (#31593, `isMovedOverrideRowOf`): W's address and lists serve it.
+  // Measured, by design: nothing in the stored state tells it apart from a
+  // genuine module-to-module move. X's own address refuses naming W.
+  it.each([['row stored first', true], ['W registered first', false]] as const)('[#33131 item 4, by design #31593] a pair row declaring a module that ships nothing of the name is the moved edit of the module that ships it (%s): W\'s address and lists serve it, X\'s address refuses naming W', async (_order, rowFirst) => {
+    const W = 'com.other.wolf';
+    registry.installPackage({ id: W, name: W, version: '1.0.0', type: 'module', namespace: 'wolf', dependencies: { [APP]: '^1.0.0', [X]: '^1.0.0' } } as never, 'code');
+    const deRow = { name: 'welcome', label: 'pair de-DE for X', locale: 'de-DE', subject: 's', bodyHtml: '<p>p</p>', overrides: { package: X } };
+    const store = () => {
+      rows.push({ id: 'row_de', type: 'email_template', name: 'welcome', state: 'active', package_id: PAIR, bundle_member: 'de-DE', metadata: JSON.stringify(deRow) });
+      registry.registerItem('email_template', { ...deRow, _packageId: PAIR, _provenance: 'org' }, 'name' as never);
+    };
+    if (rowFirst) { store(); tpl('de-DE', W); } else { tpl('de-DE', W); store(); }
+    expect(registry.packageScopedHoldersOf('email_template', 'welcome')).toEqual([W]);
+    expect(registry.getPackageScopedItem<{ label: string }>('email_template', 'welcome', W, 'de-DE')?.label, 'the registry item at W is W\'s own').toBe('wolf de-DE');
+    const atW = await read(W, 'de-DE') as { item?: { label?: string; _packageId?: string } };
+    expect([atW?.item?.label, atW?.item?._packageId]).toEqual(['pair de-DE for X', W]);
+    expect(await listed(W)).toEqual(['pair de-DE for X']);
+    expect(await forSend(W)).toEqual(['pair de-DE for X']);
+    const err = await refusalOf(() => read(X, 'de-DE'));
+    expect([err.status, err.refusal.candidates]).toEqual([409, [{ kind: 'package', packageId: W }]]);
   });
 
   it('a sole owner keeps its member: another package of the pair does not serve it (delta review S2; through the doors the qualifier refuses the non-holder first)', async () => {
@@ -1107,6 +1273,178 @@ describe('[#31699 F2] a pair member row two holders could own is refused on both
     try { served = labelOf(await read(Y, 'fr-FR')); } catch (e) { served = (e as { code?: string }).code; }
     expect(served, 'Y shares the pair but holds no template of the name').toBe('RESOURCE_CONFLICT');
     expect(await listed(Y)).not.toContain('pair fr-FR');
+  });
+});
+
+/**
+ * [#32849, ADR-0146 D8 item 2, ADR-0150 D4] The bare LAYERED read of an
+ * addition's own member whose declared override the App's pair stores. X
+ * ships `welcome` (`en-US`), the addition Z on X ships its `fr-FR`, and a row
+ * of the App's pair declares `overrides.package` Z for `fr-FR`. The plain read
+ * naming no package serves that override since the bare member read's fix
+ * (`declaredMemberOverrideAddressOf`); the layered read is "what `getMetaItem`
+ * would return" as `effective`, so it reads the member at Z too.
+ *
+ * BASE (measured on `claude/area-E1-32622` e516f353, this fixture, before the
+ * change): bare `getMetaItemLayered({ member: 'fr-FR' })` answered `code`
+ * and `effective` `zeta fr-FR` with `overlay` null in both install orders,
+ * while `?package=Z` answered `effective` `pair fr-FR` and the plain bare read
+ * `pair fr-FR`; the door's step 1c (`packagelessLayeredReadRefusal`) refused
+ * nothing.
+ */
+describe('[#32849] the bare layered read serves the pair\'s declared override of an addition Z\'s own locale as `effective`, as `?package=Z` does', () => {
+  const APP = 'com.acme.suite';
+  const X = 'com.acme.suitex';
+  const Z = 'com.acme.zeta';
+  const PAIR = `${APP}.custom`;
+  const moduleOf = (id: string, dependencies: Record<string, string>) => ({
+    id, name: id, version: '1.0.0', type: 'module', namespace: id.split('.').pop()!, dependencies,
+  }) as never;
+  const installZ = () => registry.installPackage(moduleOf(Z, { [APP]: '^1.0.0', [X]: '^1.0.0' }), 'code');
+  const tpl = (locale: string, packageId: string) => registry.registerItem('email_template', {
+    name: 'welcome', label: `${packageId.split('.').pop()} ${locale}`, locale,
+    subject: `${packageId.split('.').pop()} ${locale}`, bodyHtml: '<p>x</p>',
+  }, 'name' as never, packageId);
+  /** A row of the App's pair for `fr-FR`; an active one is hydrated as the boot lays it. */
+  const pairRow = (over: Record<string, unknown> = {}, state: 'active' | 'draft' = 'active') => {
+    const body = { name: 'welcome', label: state === 'draft' ? 'pair fr-FR draft' : 'pair fr-FR', locale: 'fr-FR', subject: 'pair fr-FR', bodyHtml: '<p>p</p>', ...over };
+    rows.push({ id: `row_fr_${state}`, type: 'email_template', name: 'welcome', state, package_id: PAIR, bundle_member: 'fr-FR', metadata: JSON.stringify(body) });
+    if (state === 'active') registry.registerItem('email_template', { ...body, _packageId: PAIR, _provenance: 'org' }, 'name' as never);
+  };
+  type Layers = { code?: { label?: string } | null; overlay?: { label?: string } | null; effective?: { label?: string; _packageId?: string } | null; draft?: { label?: string } | null; packageId?: string };
+  const layered = (member: string, packageId?: string, withDraft = false) => protocol.getMetaItemLayered({
+    type: 'email_template', name: 'welcome', member, ...(packageId ? { packageId } : {}),
+  } as never, { withDraft } as never) as Promise<Layers>;
+  const layersOf = (a: Layers) => [a.code?.label ?? null, a.overlay?.label ?? null, a.effective?.label ?? null, a.packageId];
+
+  beforeEach(() => {
+    registry.installPackage(manifest(APP), 'code');
+    registry.installPackage(moduleOf(X, { [APP]: '^1.0.0' }), 'code');
+    registry.installPackage(manifest(PAIR), 'code');
+  });
+
+  it.each([
+    ['addition installed first', () => { installZ(); tpl('en-US', X); tpl('fr-FR', Z); pairRow({ overrides: { package: Z } }); }],
+    ['row stored first', () => { tpl('en-US', X); pairRow({ overrides: { package: Z } }); installZ(); tpl('fr-FR', Z); }],
+  ] as const)('the bare layered read of `fr-FR` answers Z\'s layers with the override as `effective` (%s; BASE: `effective` `zeta fr-FR`, no overlay)', async (_order, arrange) => {
+    arrange();
+    const atZ = await layered('fr-FR', Z);
+    expect(layersOf(atZ), 'CONTROL: `?package=Z&member=fr-FR&layers=true` (UNCHANGED)').toEqual(['zeta fr-FR', 'pair fr-FR', 'pair fr-FR', Z]);
+    expect(await protocol.packagelessLayeredReadRefusal({ type: 'email_template', name: 'welcome', member: 'fr-FR' } as never), 'the door\'s step 1c refuses nothing').toBeUndefined();
+    const bare = await layered('fr-FR');
+    expect(layersOf(bare), 'bare `?member=fr-FR&layers=true`').toEqual(['zeta fr-FR', 'pair fr-FR', 'pair fr-FR', Z]);
+    expect(bare.effective, '`effective` is the document `?package=Z` serves').toEqual(atZ.effective);
+    expect(labelOf(await protocol.getMetaItem({ type: 'email_template', name: 'welcome', member: 'fr-FR' } as never)), '`effective` is what the plain bare read serves').toBe('pair fr-FR');
+    // CONTROL: X's own member is untouched by the override of Z's.
+    expect(layersOf(await layered('en-US')), 'bare `?member=en-US` (UNCHANGED)').toEqual(['suitex en-US', null, 'suitex en-US', X]);
+  });
+
+  it('the draft layer stays the strict draft read\'s, which the arm does not move: the pair\'s pending draft of `fr-FR` (UNCHANGED; at Z\'s address it is no draft)', async () => {
+    installZ(); tpl('en-US', X); tpl('fr-FR', Z);
+    pairRow({ overrides: { package: Z } });
+    pairRow({ overrides: { package: Z } }, 'draft');
+    const strictDraft = labelOf(await protocol.getMetaItem({ type: 'email_template', name: 'welcome', member: 'fr-FR', state: 'draft' } as never));
+    expect(strictDraft, 'the plain bare strict draft read').toBe('pair fr-FR draft');
+    const bare = await layered('fr-FR', undefined, true);
+    expect([bare.effective?.label, bare.draft?.label ?? null], 'bare `?member=fr-FR&layers=true` with drafts').toEqual(['pair fr-FR', strictDraft]);
+    expect((await layered('fr-FR', Z, true)).draft ?? null, 'CONTROL: `?package=Z` reads no draft there (UNCHANGED)').toBeNull();
+  });
+
+  it.each([
+    ['no row stored', () => { installZ(); tpl('en-US', X); tpl('fr-FR', Z); }],
+    ['an undeclared pair row of the locale', () => { installZ(); tpl('en-US', X); tpl('fr-FR', Z); pairRow(); }],
+  ] as const)('CONTROL — no override of Z declared (%s): the bare layered read answers Z\'s own `fr-FR` and no overlay (UNCHANGED)', async (_order, arrange) => {
+    arrange();
+    expect(layersOf(await layered('fr-FR'))).toEqual(['zeta fr-FR', null, 'zeta fr-FR', Z]);
+  });
+
+  it('CONTROL — the row declares X (the #32606 shape): the bare layered read is not moved to Z, and keeps its refusal naming both (UNCHANGED)', async () => {
+    installZ(); tpl('en-US', X); tpl('fr-FR', Z);
+    pairRow({ overrides: { package: X } });
+    const err = await refusalOf(() => layered('fr-FR'));
+    expect([err.code, err.status, err.refusal.candidates.map((c) => (c as { packageId?: string }).packageId).sort()])
+      .toEqual(['RESOURCE_CONFLICT', 409, [X, Z].sort()]);
+  });
+});
+
+/**
+ * [#33817, from #33131 N1] A package X of an App holds the name only through
+ * its own stored row (`package_id` X, hydrated into the bare slot), and that
+ * holding is a bundle ADDITION to a holder D: D ships the name, D is in X's
+ * declared dependency closure and outside X's App (a module of another App),
+ * and X's row carries a member D does not ship. The App's customization pair
+ * stores an undeclared row of another member. The review read (PR #33220, N1)
+ * predicted that X's scoped list leaves the pair row out while X's exact read
+ * admits X and serves it.
+ *
+ * MEASURED on `main` 1e65a389 with this fixture, both registration orders:
+ * they DISAGREE, as predicted. `packageScopedHoldersOf` with no caller drops X
+ * (an addition to D), so the list's `holdsNameForExactRead` is false and X's
+ * list and execution list leave the row out; X's exact read admits X (asked
+ * as the caller it names), the registry binds the row to X
+ * (`overlayRowBinding`), and `?package=X&member=de-DE` serves it. This pin
+ * records the cells as they are today; the route (which side moves) is the
+ * card's open question, so the fix flips the side it decides.
+ */
+describe('[#33817] a package holding the name only through a stored row that is a bundle addition to a closure dependency outside its App: its exact read serves the App pair\'s undeclared row, its scoped list leaves it out (measured, unresolved)', () => {
+  const APP = 'com.acme.suite';
+  const X = 'com.acme.suitex';
+  /** D's own App: D is a module of another App, so it is outside X's (X then has one App, APP). */
+  const OTHER = 'com.other.base';
+  const D = 'com.other.dee';
+  const PAIR = `${APP}.custom`;
+  const read = (packageId: string, member: string) => protocol.getMetaItem({
+    type: 'email_template', name: 'welcome', packageId, member,
+  } as never) as Promise<{ item?: { label?: string } } | undefined>;
+  const listed = async (packageId: string) => ((await protocol.getMetaItems({ type: 'email_template', packageId } as never)) as { items?: Array<{ label?: string }> })
+    .items?.map((i) => i.label).sort();
+  const forSend = async (packageId: string) => ((await protocol.getMetaItemsForExecution({ type: 'email_template', packageId } as never)) as { items?: Array<{ label?: string }> })
+    .items?.map((i) => i.label).sort();
+
+  beforeEach(() => {
+    registry.installPackage(manifest(APP), 'code');
+    registry.installPackage(manifest(OTHER), 'code');
+    registry.installPackage({
+      id: D, name: D, version: '1.0.0', type: 'module', namespace: 'dee', dependencies: { [OTHER]: '^1.0.0' },
+    } as never, 'code');
+    registry.installPackage({
+      id: X, name: X, version: '1.0.0', type: 'module', namespace: 'suitex',
+      dependencies: { [APP]: '^1.0.0', [D]: '^1.0.0' },
+    } as never, 'code');
+    registry.installPackage(manifest(PAIR), 'code');
+    registry.registerItem('email_template', {
+      name: 'welcome', label: 'dee en-US', locale: 'en-US', subject: 'dee en-US', bodyHtml: '<p>d</p>',
+    }, 'name' as never, D);
+  });
+
+  it.each([['holding first', true], ['pair row first', false]] as const)('X\'s exact read serves the pair\'s undeclared de-DE row; X\'s list and execution list leave it out (%s)', async (_order, holdingFirst) => {
+    const xFr = { name: 'welcome', label: 'suitex fr-FR', locale: 'fr-FR', subject: 'suitex fr-FR', bodyHtml: '<p>x</p>' };
+    const pairDe = { name: 'welcome', label: 'pair de-DE', locale: 'de-DE', subject: 'pair de-DE', bodyHtml: '<p>p</p>' };
+    const registerHolding = () => {
+      rows.push({ id: 'row_x', type: 'email_template', name: 'welcome', state: 'active', package_id: X, bundle_member: 'fr-FR', metadata: JSON.stringify(xFr) });
+      registry.registerItem('email_template', { ...xFr, _packageId: X, _provenance: 'org' }, 'name' as never);
+    };
+    const registerPairRow = () => {
+      rows.push({ id: 'row_de', type: 'email_template', name: 'welcome', state: 'active', package_id: PAIR, bundle_member: 'de-DE', metadata: JSON.stringify(pairDe) });
+      registry.registerItem('email_template', { ...pairDe, _packageId: PAIR, _provenance: 'org' }, 'name' as never);
+    };
+    if (holdingFirst) { registerHolding(); registerPairRow(); } else { registerPairRow(); registerHolding(); }
+
+    // The fixture is the card's: X's holding is an addition to D, so the served holders leave X out…
+    expect(registry.packageScopedHoldersOf('email_template', 'welcome'), 'X is an addition to D').not.toContain(X);
+    // …X's own count keeps it (the exact read's admission), and the registry binds the pair's row to X.
+    expect(registry.packageScopedHoldersOf('email_template', 'welcome', X), 'the caller keeps its own holding').toContain(X);
+    expect(registry.overlayRowBinding('email_template', 'welcome', { ...pairDe, _packageId: PAIR })).toBe(X);
+
+    // The two sides disagree today: the exact read serves the row, both lists leave it out.
+    expect(labelOf(await read(X, 'de-DE')), '`?package=X&member=de-DE`').toBe('pair de-DE');
+    expect(await listed(X)).toEqual(['suitex fr-FR']);
+    expect(await forSend(X)).toEqual(['suitex fr-FR']);
+
+    // CONTROL: X's own member is X's, D's list is D's own, and the pair's own address serves its row.
+    expect(labelOf(await read(X, 'fr-FR'))).toBe('suitex fr-FR');
+    expect(await listed(D)).toEqual(['dee en-US']);
+    expect(labelOf(await read(PAIR, 'de-DE'))).toBe('pair de-DE');
   });
 });
 
@@ -2108,10 +2446,13 @@ describe('[#32568] a package-less row at a holder\'s exact address: declined for
   });
 
   describe('location 4: one answer in every hydration state (both registration orders)', () => {
-    const STATES = ['stored, not hydrated', 'after the read-side hydrator', "bare-slot copy stamped ''", "bare-slot copy stamped 'sys_metadata'"] as const;
+    // [#32716 N3] The boot load (`loadMetaFromDb`) is the other hydration the
+    // card names beside the list read: the same answers before and after it.
+    const STATES = ['stored, not hydrated', 'after the read-side hydrator', 'after the boot load', "bare-slot copy stamped ''", "bare-slot copy stamped 'sys_metadata'"] as const;
     const enter = async (type: string, state: (typeof STATES)[number]) => {
       storeRow(type, 'active', 'stored');
       if (state === 'after the read-side hydrator') await protocol.getMetaItems({ type } as never);
+      if (state === 'after the boot load') expect(await protocol.loadMetaFromDb(), 'the boot load read the row').toMatchObject({ loaded: 1, errors: 0 });
       if (state.startsWith('bare-slot')) {
         registry.registerItem(type, { ...sealedBody(type, 'stored'), _provenance: 'org', _packageId: state.endsWith("''") ? '' : 'sys_metadata' }, 'name' as never);
       }
@@ -2140,11 +2481,12 @@ describe('[#32568] a package-less row at a holder\'s exact address: declined for
         }
       }
 
-      it(`${type}, one holder: the stored row is declined before and after the read-side hydrator, on the exact and the bare read (BASE: after it, both served the row)`, async () => {
+      it(`${type}, one holder: the stored row is declined before and after the boot load and the read-side hydrator, on the exact and the bare read (BASE: after the hydrator, both served the row)`, async () => {
         shipSealed(type, A);
         storeRow(type, 'active', 'stored');
-        for (const when of ['before', 'after']) {
-          if (when === 'after') await protocol.getMetaItems({ type } as never);
+        for (const when of ['before', 'after the boot load', 'after the read-side hydrator']) {
+          if (when === 'after the boot load') await protocol.loadMetaFromDb();
+          if (when === 'after the read-side hydrator') await protocol.getMetaItems({ type } as never);
           expect(labelOf(await read(type, 'approve', A)), `${when} exact`).toBe(`alpha ${type}`);
           expect(labelOf(await protocol.getMetaItem({ type, name: 'approve' } as never)), `${when} bare`).toBe(`alpha ${type}`);
         }
@@ -2409,4 +2751,188 @@ describe('[#32183] an App\'s pair two modules share, one of them disabled', () =
     expect(labelOf(neither)).toBeUndefined();
     expect(JSON.stringify(neither ?? null)).not.toMatch(/(suitex|suitey) dashboard/);
   });
+});
+
+/**
+ * [#32354, ADR-0150 D3, epic note 6820147040] The list doors beside a disabled
+ * holder: a disabled package holds no name, so no list serves what it carries
+ * for one. FROM (measured on `2b2e5b41`, both registration orders and both save
+ * orders): with A disabled, the list naming no package and its execution face
+ * listed the row A's customization pair stores at a member A does not ship,
+ * and a dependent's added locale of A's template; the lists scoped to A and to
+ * A's pair listed the pair's row too, while the exact reads of both addresses
+ * answered 404. A send naming no package reads that execution list. TO: none
+ * of them. The dependent's own list keeps its addition, as its exact read
+ * does, and an enabled holder's lists are unchanged. Re-enabled, as before.
+ */
+describe('[#32354] the list doors serve nothing a disabled holder\'s pair or dependent carries for it', () => {
+  const DEP = 'com.acme.dep';
+  const tpl = (packageId: string, locale: string) => registry.registerItem('email_template', {
+    name: 'welcome', label: `${packageId.split('.').pop()} ${locale}`, locale, subject: locale, bodyHtml: '<p>x</p>',
+  }, 'name' as never, packageId);
+  const pairRow = (name: string, label: string) => rows.push({
+    id: `row_${name}`, type: 'email_template', name, state: 'active', package_id: PAIR_A, bundle_member: 'fr-FR',
+    metadata: JSON.stringify({ name, label, locale: 'fr-FR', subject: label, bodyHtml: '<p>p</p>' }),
+  });
+  const labelsOf = async (read: Promise<{ items?: unknown[] }>, name = 'welcome') => ((await read).items ?? [])
+    .filter((it) => (it as { name?: unknown }).name === name)
+    .map((it) => (it as { label?: string }).label)
+    .sort();
+  const answers = async () => ({
+    list: await labelsOf(protocol.getMetaItems({ type: 'email_template' })),
+    execution: await labelsOf(protocol.getMetaItemsForExecution({ type: 'email_template' })),
+    atA: await labelsOf(protocol.getMetaItems({ type: 'email_template', packageId: A })),
+    executionAtA: await labelsOf(protocol.getMetaItemsForExecution({ type: 'email_template', packageId: A })),
+    atPair: await labelsOf(protocol.getMetaItems({ type: 'email_template', packageId: PAIR_A })),
+    atDep: await labelsOf(protocol.getMetaItems({ type: 'email_template', packageId: DEP })),
+    atB: await labelsOf(protocol.getMetaItems({ type: 'email_template', packageId: B })),
+  });
+  type Answers = Awaited<ReturnType<typeof answers>>;
+  const lists = (unscoped: string[], atA: string[], rest: Pick<Answers, 'atPair' | 'atDep' | 'atB'>): Answers =>
+    ({ list: unscoped, execution: unscoped, atA, executionAtA: atA, ...rest });
+
+  /** `[state, holders, carried, enabled answers, A-disabled answers]`. */
+  const STATES: ReadonlyArray<[string, readonly string[], 'pair row' | 'addition', Answers, Answers]> = [
+    ['one holder, its pair\'s row', [A], 'pair row',
+      lists(['alpha en-US', 'pair fr-FR'], ['alpha en-US', 'pair fr-FR'], { atPair: ['pair fr-FR'], atDep: [], atB: [] }),
+      lists([], [], { atPair: [], atDep: [], atB: [] })],
+    ['two holders, the disabled one\'s pair\'s row', [A, B], 'pair row',
+      lists(['alpha en-US', 'beta en-US', 'pair fr-FR'], ['alpha en-US', 'pair fr-FR'], { atPair: ['pair fr-FR'], atDep: [], atB: ['beta en-US'] }),
+      lists(['beta en-US'], [], { atPair: [], atDep: [], atB: ['beta en-US'] })],
+    ['one holder, a dependent\'s addition', [A], 'addition',
+      lists(['alpha en-US', 'dep fr-FR'], ['alpha en-US'], { atPair: [], atDep: ['dep fr-FR'], atB: [] }),
+      lists([], [], { atPair: [], atDep: ['dep fr-FR'], atB: [] })],
+    ['two holders, a dependent of the disabled one\'s addition', [A, B], 'addition',
+      lists(['alpha en-US', 'beta en-US', 'dep fr-FR'], ['alpha en-US'], { atPair: [], atDep: ['dep fr-FR'], atB: ['beta en-US'] }),
+      lists(['beta en-US'], [], { atPair: [], atDep: ['dep fr-FR'], atB: ['beta en-US'] })],
+  ];
+  const CASES = STATES.flatMap(([state, holders, carried, enabled, disabled]) =>
+    (['as listed', 'reversed'] as const).flatMap((order) => (carried === 'pair row'
+      ? (['stored first', 'stored last'] as const)
+      : (['no row'] as const)).map((save) => [state, order, save, holders, carried, enabled, disabled] as const)));
+
+  beforeEach(() => {
+    registry.installPackage({ ...(manifest(DEP) as object), dependencies: { [A]: '^1.0.0' } } as never, 'code');
+    registry.installPackage(manifest(PAIR_A), 'code');
+  });
+
+  it.each(CASES)('%s, registered %s, row %s: A disabled, no list serves what is carried for A; re-enabled, as before', async (_state, order, save, holders, carried, enabled, disabled) => {
+    if (save === 'stored first') pairRow('welcome', 'pair fr-FR');
+    const shipped: Array<[string, string]> = [...holders.map((id): [string, string] => [id, 'en-US']), ...(carried === 'addition' ? [[DEP, 'fr-FR'] as [string, string]] : [])];
+    for (const [id, locale] of order === 'reversed' ? [...shipped].reverse() : shipped) tpl(id, locale);
+    if (save === 'stored last') pairRow('welcome', 'pair fr-FR');
+
+    // CONTROL — nothing disabled: every list as on FROM.
+    expect(await answers()).toEqual(enabled);
+    registry.disablePackage(A);
+    expect(await answers()).toEqual(disabled);
+    // Read again, after the first reads hydrated the stored row: the same answers.
+    expect(await answers()).toEqual(disabled);
+    registry.enablePackage(A);
+    expect(await answers()).toEqual(enabled);
+  });
+
+  it.each(['as listed', 'reversed'] as const)('CONTROL — registered %s: the pair\'s own item of a name A ships nothing of stays listed while A is disabled, as its by-name read serves it', async (order) => {
+    const arrange = [() => tpl(A, 'en-US'), () => pairRow('farewell', 'pair own farewell')];
+    for (const step of order === 'reversed' ? [...arrange].reverse() : arrange) step();
+    registry.disablePackage(A);
+    expect(labelOf(await protocol.getMetaItem({ type: 'email_template', name: 'farewell', member: 'fr-FR' } as never))).toBe('pair own farewell');
+    for (const read of [
+      protocol.getMetaItems({ type: 'email_template' }),
+      protocol.getMetaItemsForExecution({ type: 'email_template' }),
+      protocol.getMetaItems({ type: 'email_template', packageId: PAIR_A }),
+    ]) expect(await labelsOf(read, 'farewell')).toEqual(['pair own farewell']);
+  });
+});
+
+/**
+ * [#32814] The read naming no package, at the member only a holder's
+ * customization pair stores, where every package holding the name is
+ * disabled. FROM (`main` e540baf88, measured): 200 with the pair's row
+ * (stamped with the pair), in every save and hydration order below, on the
+ * served and the execution face; with no row stored, the same read answered
+ * the holder's withheld item. TO: that withheld item, the no-row answer: a pair
+ * row is bound over the holders it is a pair of, never a holder of its own, so
+ * it is withheld with them, as `?package=PAIR` already is (R4-C above).
+ * Re-enabled, and beside an enabled holder of the same pair, as FROM.
+ */
+describe('[#32814] the read naming no package withholds a pair row of a name only disabled packages hold', () => {
+  const APP = 'com.acme.suite';
+  const X = 'com.acme.suitex';
+  const Y = 'com.acme.suitey';
+  const PAIR = `${APP}.custom`;
+  const moduleOf = (id: string) => ({
+    id, name: id, version: '1.0.0', type: 'module', namespace: id.split('.').pop()!, dependencies: { [APP]: '^1.0.0' },
+  }) as never;
+  const tpl = (packageId: string) => registry.registerItem('email_template', {
+    name: 'welcome', label: `${packageId.split('.').pop()} en-US`, locale: 'en-US', subject: 'en', bodyHtml: '<p>x</p>',
+  }, 'name' as never, packageId);
+  const storePairRow = () => rows.push({
+    id: 'row_fr', type: 'email_template', name: 'welcome', state: 'active', package_id: PAIR, bundle_member: 'fr-FR',
+    metadata: JSON.stringify({ name: 'welcome', label: 'pair fr-FR', locale: 'fr-FR', subject: 'pair fr-FR', bodyHtml: '<p>p</p>' }),
+  });
+  /** The boot's hydration: the list read lays the stored row into the registry's slot. */
+  const hydrate = () => protocol.getMetaItems({ type: 'email_template' } as never);
+  const bare = () => protocol.getMetaItem({ type: 'email_template', name: 'welcome', member: 'fr-FR' } as never);
+  const bareForExecution = () => protocol.getMetaItemForExecution({ type: 'email_template', name: 'welcome', member: 'fr-FR' } as never);
+
+  beforeEach(() => {
+    registry.installPackage(manifest(APP), 'code');
+    registry.installPackage(moduleOf(X), 'code');
+    registry.installPackage(moduleOf(Y), 'code');
+    registry.installPackage(manifest(PAIR), 'code');
+  });
+
+  const HOLDERS = [['a module of the App', X], ['the App itself', APP]] as const;
+  const ORDERS = [
+    ['the row saved, then the holder disabled', false, false],
+    ['the holder disabled, then the row saved', true, false],
+    ['the row saved and hydrated, then the holder disabled', false, true],
+    ['the holder disabled, then the row saved and hydrated', true, true],
+  ] as const;
+  const CASES = HOLDERS.flatMap(([holderLabel, holder]) => ORDERS.map(([order, disableFirst, hydrated]) =>
+    [holderLabel, order, holder, disableFirst, hydrated] as const));
+
+  it.each(CASES)('%s holds the name, %s: the bare read at the member answers the holder\'s withheld item (BASE: the pair\'s row); re-enabled, the pair\'s row', async (_holder, _order, holder, disableFirst, hydrated) => {
+    tpl(holder);
+    if (disableFirst) registry.disablePackage(holder);
+    storePairRow();
+    if (hydrated) await hydrate();
+    if (!disableFirst) registry.disablePackage(holder);
+    const answer = await bare();
+    expect(answer?.item).toBeUndefined();
+    expect((answer as { packageId?: string } | undefined)?.packageId).toBe(holder);
+    expect(JSON.stringify(answer ?? null)).not.toContain('pair fr-FR');
+    expect((await bareForExecution())?.item).toBeUndefined();
+    // CONTROL — the holder enabled again: the pair's row, as on BASE.
+    registry.enablePackage(holder);
+    expect(labelOf(await bare())).toBe('pair fr-FR');
+    expect(labelOf(await bareForExecution())).toBe('pair fr-FR');
+  });
+
+  // `version` is left out of the comparison: the withheld envelope keeps the
+  // version of what the read reached, on every withheld arm (a disabled
+  // holder's own stored row keeps its row's too), and no door serves it.
+  it.each(HOLDERS)('%s holds the name, disabled: the answer with the pair\'s row stored is the answer with none', async (_holder, holder) => {
+    tpl(holder);
+    registry.disablePackage(holder);
+    const { version: _noRowVersion, ...withoutRow } = (await bare()) as Record<string, unknown>;
+    storePairRow();
+    const { version: _rowVersion, ...withRow } = (await bare()) as Record<string, unknown>;
+    expect(withRow).toEqual(withoutRow);
+  });
+
+  it.each([['the disabled holder registered first', [X, Y]], ['the enabled holder registered first', [Y, X]]] as const)(
+    'CONTROL — two modules of the App hold the name, %s, X disabled: the bare read serves the pair\'s row (Y\'s customization), as on BASE; both disabled, withheld',
+    async (_order, order) => {
+      for (const id of order) tpl(id);
+      storePairRow();
+      registry.disablePackage(X);
+      expect(labelOf(await bare())).toBe('pair fr-FR');
+      registry.disablePackage(Y);
+      const neither = await bare();
+      expect(neither?.item).toBeUndefined();
+      expect(JSON.stringify(neither ?? null)).not.toContain('pair fr-FR');
+    },
+  );
 });

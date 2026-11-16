@@ -377,6 +377,10 @@ export const koMetadataForms: NonNullable<TranslationData['metadataForms']> = {
         label: "소유자 편집 허용",
         helpText: "켜짐: 세부 행의 소유자(owner_id)는 마스터에 대한 읽기 액세스만으로 ID로 그 행을 업데이트할 수 있습니다. 그 외 모든 사람과 모든 삽입, 삭제, 다중 행 업데이트, 대리 쓰기에는 여전히 마스터에 대한 편집 액세스가 필요합니다. 꺼짐(기본값): 세부 행의 모든 쓰기에 마스터에 대한 편집 액세스가 필요합니다."
       },
+      "sharing.controlledByParent.writeRequiresMasterRead": {
+        label: "마스터 읽기만으로 쓰기 허용",
+        helpText: "켜짐: 마스터를 읽을 수 있는 사람은 세부 객체 자체의 권한, 행 수준 보안, 필드 수준 보안이 허용하는 범위에서 세부 행을 삽입, 업데이트, 삭제할 수 있습니다. 꺼짐(기본값): 세부 행의 모든 쓰기에 마스터에 대한 편집 액세스가 필요합니다. '소유자 편집 허용'과 함께 켜지 마십시오. 이 설정이 이미 그것을 포함합니다."
+      },
       access: {
         label: "액세스",
         helpText: "와일드카드 부여 정책(ADR-0066 D2)입니다. 없으면 public으로 해석됩니다. 권한 세트의 '*' 객체 부여가 이 객체에 미치는지를 결정하며, 사용자 간 레코드 가시성은 sharingModel이 결정합니다."
@@ -963,15 +967,27 @@ export const koMetadataForms: NonNullable<TranslationData['metadataForms']> = {
       },
       refusals: {
         label: "거부",
-        helpText: "본문이 던지는 SCREAMING_SNAKE 코드(예: CLEAN_VERSION_REQUIRED)를 키로 하는 거부 카탈로그입니다. 호출자는 선언된 메시지를 자신의 언어로 번역해 선언된 상태와 함께 읽습니다. JavaScript(L2) 본문 전용"
+        helpText: "훅이 던지는 SCREAMING_SNAKE 코드(예: CLEAN_VERSION_REQUIRED)를 키로 하는 거부 카탈로그입니다. 호출자는 선언된 메시지를 자신의 언어로 번역해 선언된 상태와 함께 읽습니다. JavaScript(L2) 본문 또는 핸들러용이며, expression 본문에서는 거부됩니다"
       },
       "refusals.message": {
         label: "메시지",
-        helpText: "본문이 이 코드를 던질 때 사용자가 읽는 문장으로, 자리 표시자가 없는 일반 텍스트입니다"
+        helpText: "본문이 이 코드를 던질 때 사용자가 읽는 문장입니다. 일반 텍스트이며, 항목이 params를 선언하면 {{ name }} 자리 표시자에 선언된 매개변수가 채워집니다"
       },
       "refusals.status": {
         label: "상태",
         helpText: "거부의 HTTP 상태(400–499)입니다. 없으면 400"
+      },
+      "refusals.reasons": {
+        label: "사유",
+        helpText: "같은 코드 아래의 추가 문장으로, 본문이 코드와 함께 던지는 snake_case 사유({ code, reason })를 키로 합니다. 전송되는 코드와 상태는 이 항목의 것을 따릅니다. 여기에 선언되지 않은 사유는 거부됩니다. 없으면 던진 사유를 읽지 않습니다"
+      },
+      "refusals.reasons.message": {
+        label: "메시지",
+        helpText: "본문이 이 코드 아래에서 이 사유를 던질 때 사용자가 읽는 문장입니다. {{ }} 자리 표시자는 항목의 params를 따릅니다"
+      },
+      "refusals.params": {
+        label: "매개변수",
+        helpText: "문장에 채울 수 있는 이름(예: state)입니다. 본문이 { code, params: { state } }를 던지면 {{ state }} 자리 표시자에 그 값이 표시됩니다. 없으면 문장은 일반 텍스트입니다"
       },
       handler: {
         label: "핸들러",

@@ -30,9 +30,14 @@ import { renderOperationMessage } from '@objectstack/spec/system';
 // retries have to agree on it, and two doors each writing their own 'confirm'
 // is how one contract becomes two dialects (Prime Directive #12).
 import {
+    ACTION_CONFIRMATION_SERVICE,
     AI_ACTION_CONFIRMATION_MEMBER,
     type AIActionConfirmation,
+    type ActionConfirmationHandOff,
+    type ActionConfirmationPending,
+    type ActionConfirmationRefusalReason,
     type ActionConfirmationRequiredDetails,
+    type IActionConfirmationService,
 } from '@objectstack/spec/contracts';
 import { checkApiExposure, type ApiExposureDecision, type ObjectApiDef } from './api-exposure.js';
 // [#22823] The ONE walk every door that hands a caller's filter to the engine
@@ -1328,6 +1333,15 @@ const API_FORWARD_IDENTITY_HEADERS: ReadonlySet<string> = new Set([
  */
 export const API_FORWARD_MARK_HEADER = 'x-objectstack-action-forward';
 
+/**
+ * [#32658, #32887] The declared environment header (`X-Environment-Id`,
+ * lower-case as the forward's header bag spells it): what a host's
+ * `kernel-resolver` reads to place a request in its environment, written onto
+ * a forward from the environment its request was placed in
+ * ({@link forwardApiAction}'s `routing`).
+ */
+const API_FORWARD_ENVIRONMENT_HEADER = 'x-environment-id';
+
 /** The response headers relayed back to the caller — the credential rotations. */
 const API_FORWARD_RELAYED_RESPONSE_HEADERS: readonly string[] = [
     // better-auth's bearer lane (`bearer()` emits `set-auth-token`; #8243's
@@ -2078,6 +2092,16 @@ export function apiActionForwardLoopError(action: any, mark: string): string {
  * A caller whose credential the target's door cannot read is never
  * forwarded ({@link apiForwardCredentialRefusal}).
  *
+ * [#32658, #32887] `routing.environmentId` is the environment a multi-kernel
+ * host's resolver placed the request in. The forward targets the action's own
+ * path, so a scoped URL's environment does not cross with it, and the host
+ * door's request has no hostname at all: the forward carries the placement as
+ * the declared environment header, which places it in the same environment at
+ * the raw app. It replaces any spelling the caller sent, so the forward cannot
+ * be steered anywhere the request did not run. Absent (a single kernel, no
+ * placement, the control plane), nothing is written and the caller's own
+ * allow-listed headers cross as they always did.
+ *
  * [ADR-0090 D10 rule 5] An AI agent principal is the one caller whose own
  * credential is never carried. At the two cells the table flips
  * ({@link API_FORWARD_AGENT_CREDENTIAL_DOORS}) the forward drops every caller
@@ -2102,6 +2126,7 @@ export async function forwardApiAction(
     requestContext: HttpProtocolContext,
     req: ApiActionRequest,
     mark: { objectName: string; actionName: string; target?: string; recordId?: string },
+    routing?: { environmentId?: string },
 ): Promise<ApiActionForwardAnswer> {
     // A caller whose credential the target's door cannot read (the table,
     // {@link API_FORWARD_DOOR_ACCEPTS}) is refused here, before the target is
@@ -2135,6 +2160,7 @@ export async function forwardApiAction(
         if (agent && API_FORWARD_IDENTITY_HEADERS.has(key)) continue;
         headers[key] = Array.isArray(v) ? v.join(', ') : String(v);
     }
+    if (routing?.environmentId) headers[API_FORWARD_ENVIRONMENT_HEADER] = routing.environmentId;
     headers.accept = 'application/json';
     headers[API_FORWARD_MARK_HEADER] = `${mark.objectName}/${mark.actionName}`;
     const init: RequestInit = { method: req.method, headers };
@@ -2997,9 +3023,13 @@ export function actionLooksDestructive(_deps: ActionExecutionDeps, action: any):
  * REST `/actions` and a host door on `rest` refuse it too, and the MCP
  * `resume_run` door asks it for every candidate action.
  *
- * For every other caller, the doors that enforce the author's AI opt-in —
- * today {@link invokeBusinessAction}, reached from the MCP `run_action` tool,
- * and `resume_run`. REST `/actions` (`domains/actions.ts`) is NOT
+ * For every other caller, a door that enforces the author's AI opt-in and
+ * still reads the member: today a host's door under the `ai` posture
+ * (`dispatchAction`, `action-dispatch.ts`). [#33690] The MCP `run_action`
+ * ({@link invokeBusinessAction}) and `resume_run` doors no longer read it:
+ * under the amended contract they hand a declared-gated call to the person
+ * ({@link aiDoorConfirmation}, {@link handOffActionConfirmation}) and the
+ * caller's `confirm` never counts. REST `/actions` (`domains/actions.ts`) is NOT
  * `ai.exposed`-gated and sits OUTSIDE this gate for a person and for a
  * delegated agent. Widening that set is its own decision, not a thing to infer
  * from this comment.
@@ -3058,28 +3088,198 @@ export function actionConfirmationRefusal(
     if (!account && request?.[AI_ACTION_CONFIRMATION_MEMBER] === true) return undefined;
 
     const actionName = String(action?.name ?? '');
+    const declared = `Action '${actionName}'${confirmationSubjectOn(objectName)} declares ai.requiresConfirmation: true — nothing was run. `;
+    // For an account the message states the rule and prescribes no retry:
+    // nothing the account adds to the request runs this action. Its refusal
+    // carries `reason: 'service_account'` at every door (the amended
+    // contract, rule 6); a person's member refusal carries none, which is how
+    // a caller tells a member gate from the amended doors.
+    return account
+        ? confirmationRefusalOf(
+            actionName, objectName,
+            declared + 'An AI service account does not confirm an action for itself: a person runs this action.',
+            'service_account',
+        )
+        : confirmationRefusalOf(
+            actionName, objectName,
+            declared
+                + `Confirm with the human in the loop, then retry this call with `
+                + `'${AI_ACTION_CONFIRMATION_MEMBER}': true on the request.`,
+        );
+}
+
+/** ` on '<object>'`, or nothing for an object-less action: the refusals' and the hand-off's shared phrase. */
+function confirmationSubjectOn(objectName: string | undefined): string {
+    return objectName ? ` on '${objectName}'` : '';
+}
+
+/** The registered `ACTION_CONFIRMATION_REQUIRED` envelope, `reason` set only when given. */
+function confirmationRefusalOf(
+    actionName: string,
+    objectName: string | undefined,
+    message: string,
+    reason?: ActionConfirmationRefusalReason,
+): ActionConfirmationRefusal {
     const details: ActionConfirmationRequiredDetails = {
         actionName,
         ...(objectName ? { objectName } : {}),
         // Echoed off the constant so a refused caller reads the member's
         // spelling from the refusal instead of hard-coding it from docs.
         confirmationMember: AI_ACTION_CONFIRMATION_MEMBER,
+        ...(reason !== undefined ? { reason } : {}),
     };
-    const on = objectName ? ` on '${objectName}'` : '';
-    const declared = `Action '${actionName}'${on} declares ai.requiresConfirmation: true — nothing was run. `;
+    return { code: ACTION_CONFIRMATION_REQUIRED_CODE, status: ACTION_CONFIRMATION_REQUIRED_STATUS, message, details };
+}
+
+/**
+ * [#33690] The confirmation step of the MCP `run_action` and `resume_run`
+ * doors under the amended contract (`AI_ACTION_CONFIRMATION_CAPABILITY`,
+ * `@objectstack/spec/contracts`; ADR-0011, the note on confirmation): what
+ * the door does with a call on `action` from `caller`.
+ *
+ *  - `admit`: the author declared no gate (`ai.requiresConfirmation` is not
+ *    `true` — the DECLARED flag, as {@link actionConfirmationRefusal} reads
+ *    it), so the call runs as any admitted call does.
+ *  - `refuse`: an AI service account (ADR-0151 D3 rule 3), refused whatever
+ *    it sends, `reason: 'service_account'`, exactly as the member gate
+ *    refuses it. It is never handed off: no person stands behind it.
+ *  - `hand-off`: every other caller. The call is handed to the person it runs
+ *    as ({@link handOffActionConfirmation}) once every other admission gate
+ *    has passed, and nothing runs here.
+ *
+ * ⛔ The request is not a parameter, on purpose: the caller's
+ * `confirm` (`AI_ACTION_CONFIRMATION_MEMBER`) never counts on such a call,
+ * and a function that cannot read the member cannot be satisfied by it. The
+ * caller's own `confirm: true` was an unverifiable claim an agent made for its
+ * person; this door asks the person instead.
+ */
+export type AiDoorConfirmation =
+    | { kind: 'admit' }
+    | { kind: 'refuse'; refusal: ActionConfirmationRefusal }
+    | { kind: 'hand-off' };
+
+export function aiDoorConfirmation(
+    deps: ActionExecutionDeps,
+    action: any,
+    objectName: string | undefined,
+    caller: unknown,
+): AiDoorConfirmation {
+    if (action?.ai?.requiresConfirmation !== true) return { kind: 'admit' };
+    if (isAiServiceAccountCaller(caller)) {
+        // The member gate's own account refusal: it does not read the request
+        // for an account, so `undefined` loses nothing.
+        return { kind: 'refuse', refusal: actionConfirmationRefusal(deps, action, undefined, objectName, caller)! };
+    }
+    return { kind: 'hand-off' };
+}
+
+/**
+ * [#33690] The host's pending-confirmation service, registered under
+ * `ACTION_CONFIRMATION_SERVICE` (`'ai.actionConfirmation'`), or `null` when
+ * this kernel registers none — the open build ships none, so a bare
+ * deployment answers `null`. Resolved per call, where it is used: a host
+ * registers it in its own plugin, and a resolution at startup would record a
+ * verdict the boot can still contradict. A registration without a `submit`
+ * member, or a resolution that throws, reads as none: the door then refuses,
+ * so nothing ever runs for want of the service.
+ */
+export async function resolveActionConfirmationService(
+    deps: ActionExecutionDeps,
+    requestContext: HttpProtocolContext,
+    envId?: string,
+): Promise<IActionConfirmationService | null> {
+    try {
+        const svc = await deps.resolveService(requestContext, ACTION_CONFIRMATION_SERVICE, envId);
+        return svc && typeof svc.submit === 'function' ? (svc as IActionConfirmationService) : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * [#33690] Hand a declared-gated call off to the person it runs as (step 2 of
+ * the amended contract), or refuse it when the host has no service to hand it
+ * to (step 3). Runs nothing either way.
+ *
+ * - A registered service: `submit(handOff, ec)` records the call for the
+ *   person and notifies them; the door answers `ActionConfirmationPending`
+ *   (`status: 'pending_confirmation'`, the service's `pendingId`, a plain
+ *   message). A hand-off is not a refusal, it is the call's successful answer.
+ *   What happens next — approval in the app, the action running as the
+ *   approver with every gate re-checked, a rejection, a lapse — is the
+ *   host's (`IActionConfirmationService`).
+ * - None: `428 ACTION_CONFIRMATION_REQUIRED`, `details.reason:
+ *   'no_confirmation_service'`. The message names the one route that works on
+ *   this server — performing the action in the app — and no retry: no request
+ *   this caller can send runs the action here.
+ *
+ * A service that answers no `pendingId` is a broken host, never a hand-off
+ * that happened: thrown, so the caller is not told a person was asked.
+ */
+export async function handOffActionConfirmation(
+    deps: ActionExecutionDeps,
+    requestContext: HttpProtocolContext,
+    envId: string | undefined,
+    handOff: ActionConfirmationHandOff,
+    ec: any,
+): Promise<{ pending: ActionConfirmationPending } | { refused: ActionConfirmationRefusal }> {
+    const on = confirmationSubjectOn(handOff.objectName);
+    const declared = `Action '${handOff.actionName}'${on} declares ai.requiresConfirmation: true, so a person confirms it`;
+    const service = await resolveActionConfirmationService(deps, requestContext, envId);
+    if (!service) {
+        return {
+            refused: confirmationRefusalOf(
+                handOff.actionName, handOff.objectName,
+                `${declared} — nothing was run. This server has no pending-confirmation service to ask them through, `
+                    + `and a confirmation sent on the request does not count. Perform the action in the app instead.`,
+                'no_confirmation_service',
+            ),
+        };
+    }
+    const submitted = await service.submit(handOff, ec as ExecutionContext);
+    const pendingId = submitted?.pendingId;
+    if (typeof pendingId !== 'string' || pendingId === '') {
+        throw new Error(
+            `The pending-confirmation service (${ACTION_CONFIRMATION_SERVICE}) answered no pendingId for action `
+                + `'${handOff.actionName}'${on}; nothing was run and no confirmation can be tracked.`,
+        );
+    }
     return {
-        code: ACTION_CONFIRMATION_REQUIRED_CODE,
-        status: ACTION_CONFIRMATION_REQUIRED_STATUS,
-        // For an account the message states the rule and prescribes no retry:
-        // nothing the account adds to the request runs this action.
-        message: account
-            ? declared
-                + 'An AI service account does not confirm an action for itself: a person runs this action.'
-            : declared
-                + `Confirm with the human in the loop, then retry this call with `
-                + `'${AI_ACTION_CONFIRMATION_MEMBER}': true on the request.`,
-        details,
+        pending: {
+            status: 'pending_confirmation',
+            pendingId,
+            message:
+                `${declared}. Nothing has run yet: a confirmation request was sent to the person this call runs as, `
+                    + `who approves or rejects it in the app. It runs only if they approve it, as them. `
+                    + `Pending confirmation: ${pendingId}.`,
+            actionName: handOff.actionName,
+            ...(handOff.objectName ? { objectName: handOff.objectName } : {}),
+        },
     };
+}
+
+/**
+ * [#33690] The caller-scope subject verdict, as the dispatch arm that would
+ * run `action` reads it, asked BEFORE a hand-off (the amended contract, step
+ * 2: every admission gate has passed, the subject load and its verdict
+ * included, so nobody is asked to confirm a call that is refused anyway). A
+ * declarative update asks its object-level update refusal first (#30848), as
+ * its arm does; every other arm asks {@link refuseDeniedSubjectLoadBeforeDispatch}.
+ * Throws the refusal the arm would throw; reads nothing new.
+ */
+export async function refuseDeniedSubjectBeforeHandOff(
+    deps: ActionExecutionDeps,
+    requestContext: HttpProtocolContext,
+    action: any,
+    wiring: { objectName: string; recordId: string | undefined; subject: ActionSubjectRecordLoad; ec: any; envId?: string },
+): Promise<void> {
+    const { objectName, recordId, subject, ec, envId } = wiring;
+    if (isDeclarativeUpdateAction(action)) {
+        if (subject.recordLoadDenied) await refuseUngrantedDeclarativeUpdate(deps, requestContext, objectName, ec, envId);
+        refuseDeniedSubjectLoad(objectName, recordId, subject);
+        return;
+    }
+    refuseDeniedSubjectLoadBeforeDispatch(action, objectName, recordId, subject);
 }
 
 export function summarizeAction(
@@ -4698,7 +4898,10 @@ export async function invokeBusinessAction(deps: ActionExecutionDeps,
             ? { unknownName: addressedUnknownNameRefusal(name, input?.objectName, qualifier) }
             : askedObject ? {} : { unknownName: refusalOfThrown(objectlessNameNotFoundError(name)) }),
         body: { params, ...(recordId !== undefined ? { recordId } : {}) },
-        confirmation: input,
+        // [#33690] This door hands a declared-gated call to the person it runs
+        // as: the caller's `confirm` is not passed on, because it never counts
+        // there (the amended contract, `AI_ACTION_CONFIRMATION_CAPABILITY`).
+        confirmationHandOff: { door: 'mcp', ...(namespace !== undefined ? { namespace } : {}) },
         ql: engine,
         wiring: {
             ec, envId, driver, callData,
@@ -4706,6 +4909,10 @@ export async function invokeBusinessAction(deps: ActionExecutionDeps,
         },
     });
     if ('refused' in run) throw refusalThrownByBridge(run.refused);
+    // [#33690] Handed to the person: the successful answer, nothing ran, and
+    // no invocation row is written (the call did not run; the host's pending
+    // item is its record, and an approved run writes its own row).
+    if ('handedOff' in run) return run.handedOff;
 
     // [#27908 — ruling 6513869839 on #27681, parameter 3] THE INVOCATION ROW.
     // Every call that cleared the gates writes one `action_invocation` row,
@@ -6064,13 +6271,29 @@ export async function resolveRouteActionDeclaration(deps: ActionExecutionDeps,
             }
             return { action: undefined, obj, degraded: true, reason: err?.message ?? String(err) };
         }
+        // [#32989, #32996] The bare read cannot see the object: where the name
+        // has a package-less item or a disabled package beside a package
+        // holder, its answer depends on who else holds the name. The route's
+        // answer is who holds the name on the route.
+        const census = await routeHolderCensus({
+            ql, objectName, actionName, obj, ownsRoute,
+            readAt: (packageId) => byName.call(protocol, { type: 'action', name: actionName, packageId }),
+        });
+        if (census !== undefined) return census;
         const item: any = (envelope as { item?: unknown } | null | undefined)?.item;
+        // [ADR-0150 D4] The bare read names no object, so of the name's
+        // package-less actions — one per owner key — it answers one: the
+        // route's is the one on its own key, bound first, then object-less.
+        const onRoute = packagelessActionOnRouteBeside(ql, objectName, actionName, item);
+        if (onRoute !== undefined) return { action: onRoute, obj };
         const declared = item !== null && typeof item === 'object' && item.name === actionName && ownsRoute(item);
         return { action: declared ? item : undefined, obj };
     }
 
     try {
         const fromRegistry: any = ql?.registry?.getItem?.('action', actionName);
+        const onRoute = packagelessActionOnRouteBeside(ql, objectName, actionName, fromRegistry);
+        if (onRoute !== undefined) return { action: onRoute, obj };
         if (fromRegistry && ownsRoute(fromRegistry)) return { action: fromRegistry, obj };
     } catch {
         /* registry without an item lookup → fall through to the metadata service */
@@ -6196,70 +6419,291 @@ async function routeOwnerOfRefusedRead(
 }
 
 /**
- * [#32751] The declaration of a route no holder of a refused name owns
- * ({@link routeOwnerOfRefusedRead}): the environment's own item, bound to the
- * routed object first and object-less after (the order the router reaches a
- * handler in). Never read at a holder's exact address, and never served as a
- * holder's: the answer carries no package, so the dispatch is unqualified, as
- * the bare call's always was.
+ * [#32751, #32996] Who holds `actionName` on the route of `objectName`, read
+ * from the registry's listing of every holder (`includeDisabledPackages`) and
+ * the environment's own store: each item that owns the route — bound to the
+ * routed object, or object-less, the two rungs the router reaches a handler
+ * on, bound first — filed under its holder:
  *
- * The environment's own item is a package-less registry item whose row the
- * environment's store holds bound to no package ({@link environmentStoredActionNames},
- * the test {@link packagelessOriginOf} applies): the row's source, never a
- * byte of the definition. A package-less item with no such row is the
- * platform's (host code or a plugin) and is not served here. The protocol's
- * reads cannot answer this: beside two package holders its bare read refuses
- * the name, and its merged listing folds the package-less item into the
- * holders' slots as their stand-in.
+ *  - `served` — an enabled package's item;
+ *  - `disabled` — a disabled package's item. The protocol's reads withhold
+ *    it, so they cannot tell that a disabled package still binds the route;
+ *    this listing can;
+ *  - `environment` — a package-less item whose row the environment's store
+ *    holds bound to no package ({@link environmentStoredActionNames}, the test
+ *    {@link packagelessOriginOf} applies): the row's source, never a byte of
+ *    the definition;
+ *  - `platform` — any other package-less item (host code or a plugin).
  *
- * Only when no package holds the name on this route's key, a DISABLED one
- * included (ruling 6824698376, letter A: a disabled package is still a
- * holder). The protocol's reads withhold a disabled package's item, so they
- * cannot tell; the registry's listing of every holder can
- * (`includeDisabledPackages`). A route a disabled package's action binds
- * stays no declaration, never handed to the environment's item, and so does
- * a route on a host whose registry cannot list every holder or whose engine
- * has no store to read (no `find`, or no `sys_metadata` object). Any other
- * store read that throws is the plane failing to answer (ADR-0110 D3):
- * `degraded`, never "no row".
+ * The registry keeps ONE package-less item per name: a platform item and the
+ * environment's own replace each other there, the later registration staying
+ * (the registry's rule, not this reader's). So a rung never holds both, and
+ * the environment's item bound to the routed object and its object-less one
+ * are never both listed: "bound before object-less" among the environment's
+ * own items is not observable today.
+ *
+ * `undefined` when the host cannot answer: a registry with no listing of
+ * every holder, or an engine with no store to read (no `find`). Every
+ * package-less item is `platform` when the engine registers no metadata store
+ * at all ({@link listingNotServed}). Any other store read that throws is the
+ * plane failing to answer (ADR-0110 D3): `degraded`, never "no row". The store
+ * is read only when a package-less item owns the route.
  */
-async function environmentOwnerOfUnheldRoute(
-    args: { ql: any; objectName: string; actionName: string; obj: any },
-): Promise<RouteActionDeclaration> {
-    const { ql, objectName, actionName, obj } = args;
-    const none: RouteActionDeclaration = { action: undefined, obj };
+interface RouteHolders { served: any[]; disabled: any[]; environment: any[]; platform: any[] }
+type RouteHolderReading =
+    | { degraded: true; reason: string }
+    | {
+        degraded?: undefined;
+        /** Every holder's item of the name, on any key. */
+        named: any[];
+        /** Is this item's package disabled? */
+        isDisabled: (item: any) => boolean;
+        /** The holders that own the route, both rungs. */
+        owners: RouteHolders;
+        /** The rung the router reaches first: bound to the routed object, else object-less. */
+        rung: RouteHolders;
+        /** [ADR-0150 D4] Is {@link rung} the bound one (some holder's item is bound to the routed object)? */
+        boundRung: boolean;
+    };
+
+/** [ADR-0150 D4] Is a registry item a package's (`_packageId`), not package-less? */
+function packagedItem(item: any): boolean {
+    return typeof item?._packageId === 'string' && item._packageId !== '';
+}
+
+/** [ADR-0150 D4] Is an item package-less: no package stamp, or the stored-row sentinel? */
+function packagelessItem(item: any): boolean {
+    return !packagedItem(item) || item._packageId === 'sys_metadata';
+}
+
+/**
+ * [ADR-0150 D4] The package-less action of `actionName` that answers the route
+ * of `objectName`, when the read the route took (`answered`) is a package-less
+ * action of ANOTHER owner key. An action is identified by `(owner, owning
+ * object, name)`, and the registry keeps the name's package-less actions one
+ * per owner key (the platform's bound to `lead` beside the environment's
+ * object-less one), while a read that names no object answers only one of
+ * them. Binding first, then owner: the route's is the package-less action
+ * bound to the routed object, else the object-less one — the order the
+ * engine reaches a handler in ({@link actionHandlerObjectKeys}), so the
+ * declaration the route judges and the handler it runs are one item's.
+ *
+ * `undefined` — the read's answer stands — when the answer is no
+ * package-less action, already the one on the route's key, or the host's
+ * registry cannot list the name's items; and when no package-less action is
+ * on the route's key.
+ */
+function packagelessActionOnRouteBeside(ql: any, objectName: string, actionName: string, answered: any): any | undefined {
+    if (answered === null || typeof answered !== 'object' || answered.name !== actionName || !packagelessItem(answered)) return undefined;
     const registry: any = ql?.registry;
-    if (typeof registry?.listItems !== 'function') return none;
+    if (typeof registry?.listItems !== 'function') return undefined;
+    let packageless: any[];
+    try {
+        packageless = (registry.listItems('action', undefined, { includeDisabledPackages: true }) ?? [])
+            .filter((item: any) => item?.name === actionName && packagelessItem(item));
+    } catch {
+        return undefined;
+    }
+    const bound = isObjectLessActionKey(objectName) ? [] : packageless.filter((item) => standaloneActionOwnerKey(item) === objectName);
+    const rung = bound.length > 0 ? bound : packageless.filter((item) => isObjectLessActionKey(standaloneActionOwnerKey(item)));
+    if (rung.length !== 1) return undefined;
+    const ownerKey = (item: any) => (isObjectLessActionKey(standaloneActionOwnerKey(item)) ? GLOBAL_ACTION_OBJECT_KEY : standaloneActionOwnerKey(item));
+    return ownerKey(rung[0]) === ownerKey(answered) ? undefined : rung[0];
+}
+
+async function readRouteHolders(
+    args: { ql: any; objectName: string; actionName: string },
+    /**
+     * Asked of the listing BEFORE the store is read: `false` answers
+     * `undefined` with no store read, so a caller that can only answer some
+     * compositions never pays the store's scans (or its outage) on the others.
+     */
+    admit: (named: readonly any[], isDisabled: (item: any) => boolean) => boolean = () => true,
+): Promise<RouteHolderReading | undefined> {
+    const { ql, objectName, actionName } = args;
+    const registry: any = ql?.registry;
+    if (typeof registry?.listItems !== 'function') return undefined;
     let named: any[];
     try {
         named = (registry.listItems('action', undefined, { includeDisabledPackages: true }) ?? [])
             .filter((item: any) => item?.name === actionName);
     } catch {
-        return none;
+        return undefined;
     }
-    const ownsRoute = (item: any): boolean => {
-        const owner = standaloneActionOwnerKey(item);
-        return owner === objectName || isObjectLessActionKey(owner);
-    };
-    const packaged = (item: any): boolean => typeof item?._packageId === 'string' && item._packageId !== '';
-    if (named.some((item) => packaged(item) && ownsRoute(item))) return none;
-    const packageless = named.filter((item) => !packaged(item) && ownsRoute(item));
-    if (packageless.length === 0) return none;
+    const isDisabled = (item: any): boolean => packagedItem(item)
+        && typeof registry.isPackageDisabled === 'function' && registry.isPackageDisabled(item._packageId) === true;
+    if (!admit(named, isDisabled)) return undefined;
     const store = environmentStoredActionNames(ql);
-    if (store === undefined) return none;
-    let stored: ReadonlySet<string>;
+    if (store === undefined) return undefined;
+    const isBound = (item: any): boolean =>
+        !isObjectLessActionKey(objectName) && standaloneActionOwnerKey(item) === objectName;
+    const isObjectLess = (item: any): boolean => isObjectLessActionKey(standaloneActionOwnerKey(item));
+    const ownerItems = named.filter((item) => isBound(item) || isObjectLess(item));
+    let stored: ReadonlySet<string> = new Set<string>();
+    if (ownerItems.some((item) => !packagedItem(item))) {
+        try {
+            stored = (await store()).actions;
+        } catch (err: any) {
+            // An engine that registers no metadata store has no environment
+            // row: nothing here is the environment's.
+            if (!listingNotServed(err)) return { degraded: true, reason: err?.message ?? String(err) };
+        }
+    }
+    const file = (items: any[]): RouteHolders => {
+        const holders: RouteHolders = { served: [], disabled: [], environment: [], platform: [] };
+        for (const item of items) {
+            if (packagedItem(item)) (isDisabled(item) ? holders.disabled : holders.served).push(item);
+            else if (stored.has(`${standaloneActionOwnerKey(item)}:${actionName}`)) holders.environment.push(item);
+            else holders.platform.push(item);
+        }
+        return holders;
+    };
+    const bound = ownerItems.filter(isBound);
+    return {
+        named,
+        isDisabled,
+        owners: file(ownerItems),
+        rung: file(bound.length > 0 ? bound : ownerItems.filter(isObjectLess)),
+        boundRung: bound.length > 0,
+    };
+}
+
+/**
+ * [#32751] The declaration of a route no holder of a refused name owns
+ * ({@link routeOwnerOfRefusedRead}): the environment's own item on the route's
+ * first rung ({@link readRouteHolders}). Never read at a holder's exact
+ * address, and never served as a holder's: the answer carries no package, so
+ * the dispatch is unqualified, as the bare call's always was. A package-less
+ * item with no row in the environment's store is the platform's and is not
+ * served here. The protocol's reads cannot answer this: beside two package
+ * holders its bare read refuses the name, and its merged listing folds the
+ * package-less item into the holders' slots as their stand-in.
+ *
+ * Only when no package's action owns the route, a DISABLED package's
+ * included. This is main's own answer, kept: with only the environment's item
+ * and a disabled package's action on the route — bound to the routed object
+ * or object-less — the route answers no declaration, never the environment's
+ * item ({@link routeHolderCensus} gives that answer whatever other holders the
+ * name has). So does a route on a host whose registry cannot list every
+ * holder or whose engine has no store to read.
+ */
+async function environmentOwnerOfUnheldRoute(
+    args: { ql: any; objectName: string; actionName: string; obj: any },
+): Promise<RouteActionDeclaration> {
+    const { obj } = args;
+    const none: RouteActionDeclaration = { action: undefined, obj };
+    const reading = await readRouteHolders(args);
+    if (reading === undefined) return none;
+    if (reading.degraded) return { action: undefined, obj, degraded: true, reason: reading.reason };
+    if (reading.owners.served.length > 0 || reading.owners.disabled.length > 0) return none;
+    return reading.rung.environment.length === 1 ? { action: reading.rung.environment[0], obj } : none;
+}
+
+/**
+ * [ADR-0150 D4] The platform's item bound to the routed object, when it is
+ * the only item on the route's bound rung: binding first, then owner, so it
+ * answers that route whatever package-less action of another key the name
+ * has (the environment's object-less one included), and the declaration the
+ * route judges is the item whose handler the engine reaches first there.
+ * `undefined` on the object-less rung, and beside any other item on the
+ * bound one: those compositions keep their answers.
+ */
+function platformItemOnBoundRung(reading: Extract<RouteHolderReading, { degraded?: undefined }>): any | undefined {
+    const { rung, boundRung } = reading;
+    if (!boundRung || rung.platform.length !== 1) return undefined;
+    return rung.served.length === 0 && rung.disabled.length === 0 && rung.environment.length === 0 ? rung.platform[0] : undefined;
+}
+
+/**
+ * [#32989, #32996] The bare route's declaration when the name has a package
+ * holder beside a package-less item or a disabled package: the compositions
+ * where the protocol's bare by-name read, which cannot see the routed object,
+ * answers by who ELSE holds the name. Beside one package it answers the
+ * environment's item wherever that item is bound, so a served holder's own
+ * route read the environment's item on another object and answered no
+ * declaration; beside a disabled package its answer moves with registration
+ * order; and it stamps the package-less item with a holder's package. The
+ * route decides from who holds the name ON THE ROUTE ({@link readRouteHolders}),
+ * in this order:
+ *
+ *  1. no served package's action owns the route and a disabled package's
+ *     does: no declaration, whatever other holders the name has (main's own
+ *     answer beside the environment's item, {@link environmentOwnerOfUnheldRoute});
+ *  2. the environment's own item on the route's first rung: that item, with
+ *     no package (ADR-0150 D3: the environment's own declaration answers
+ *     first on one owner key);
+ *  3. exactly one served package on the route's first rung, and no platform
+ *     item there: that package's own declaration, read at its exact address
+ *     (`packageId`, the protocol's execution face, which the disabled-package
+ *     face governs as the bare read's does) and served with no package, so the
+ *     dispatch is unqualified, as the bare call's always was. A disabled
+ *     co-holder, and the environment's or the platform's item on another
+ *     object, do not change it. A refusal of that address leaves the bare
+ *     read's answer; any other throw is an outage (ADR-0110 D3).
+ *
+ * `undefined`, so the bare read answers as before, for every other
+ * composition: no package holder; nothing package-less and nothing disabled;
+ * a platform item on the first rung; two served packages there; and a host
+ * {@link readRouteHolders} cannot read.
+ */
+async function routeHolderCensus(
+    args: {
+        ql: any; objectName: string; actionName: string; obj: any;
+        ownsRoute: (action: any) => boolean;
+        readAt: (packageId: string) => Promise<unknown>;
+    },
+): Promise<RouteActionDeclaration | undefined> {
+    const { obj, actionName, ownsRoute, readAt } = args;
+    // [review 6879733874 M1] The composition is judged on the listing alone,
+    // before the store is read: a name with no package holder, or with
+    // nothing package-less and nothing disabled beside its packages — the
+    // one-holder case among them — never reads the store, so it never pays
+    // its scans nor answers `degraded` when the store is down.
+    const reading = await readRouteHolders(args, (named, isDisabled) =>
+        named.some(packagedItem) && (named.some((item) => !packagedItem(item)) || named.some(isDisabled)));
+    if (reading === undefined) return undefined;
+    if (reading.degraded) return { action: undefined, obj, degraded: true, reason: reading.reason };
+    const { owners, rung } = reading;
+    if (owners.served.length === 0 && owners.disabled.length > 0) return { action: undefined, obj };
+    if (rung.environment.length === 1) return { action: rung.environment[0], obj };
+    // [ADR-0150 D4] …the platform's item bound to the routed object, alone on
+    // that rung: the route's own key, binding first, then owner.
+    const platform = platformItemOnBoundRung(reading);
+    if (platform !== undefined) return { action: platform, obj };
+    if (rung.served.length !== 1 || rung.platform.length > 0) return undefined;
+    let envelope: unknown;
     try {
-        stored = (await store()).actions;
+        envelope = await readAt(rung.served[0]._packageId);
     } catch (err: any) {
-        // An engine that registers no metadata store has no environment row:
-        // nothing here is the environment's ({@link listingNotServed}).
-        if (listingNotServed(err)) return none;
+        if (refusalOf(err) !== undefined) return undefined;
         return { action: undefined, obj, degraded: true, reason: err?.message ?? String(err) };
     }
-    const own = packageless.filter((item) => stored.has(`${standaloneActionOwnerKey(item)}:${actionName}`));
-    const bound = own.filter((item) => !isObjectLessActionKey(standaloneActionOwnerKey(item)));
-    const rung = bound.length > 0 ? bound : own;
-    return rung.length === 1 ? { action: rung[0], obj } : none;
+    const item: any = (envelope as { item?: unknown } | null | undefined)?.item;
+    return item !== null && typeof item === 'object' && item.name === actionName && ownsRoute(item)
+        ? { action: item, obj }
+        : undefined;
+}
+
+/**
+ * [#32988] The environment's own item at its exact address
+ * `/actions/_env/:object/:action` when the merged listing does not list it:
+ * beside a package holder of the name that listing folds the package-less
+ * item into a stand-in for the holder, so the address found nothing and
+ * answered `404`. Read from who holds the name on the route
+ * ({@link readRouteHolders}): the environment's own item on the route's first
+ * rung, bound to the routed object first and object-less after, whatever the
+ * other holders. Never a package's item and never the platform's (no row in
+ * the environment's store), and never served as a holder's: no package.
+ * `undefined` when the environment holds none there or the host cannot tell,
+ * so the address's `404` stands.
+ */
+async function environmentItemAtOwnAddress(
+    args: { ql: any; objectName: string; actionName: string; obj: any },
+): Promise<RouteActionDeclaration | undefined> {
+    const reading = await readRouteHolders(args);
+    if (reading === undefined) return undefined;
+    if (reading.degraded) return { action: undefined, obj: args.obj, degraded: true, reason: reading.reason };
+    return reading.rung.environment.length === 1 ? { action: reading.rung.environment[0], obj: args.obj } : undefined;
 }
 
 /**
@@ -6331,6 +6775,13 @@ export async function resolveAddressedRouteActionDeclaration(deps: ActionExecuti
             : await deps.resolveService(requestContext, 'metadata', envId);
         const resolved = await resolveActionByName(deps, meta, actionName, objectName, objects, actions, qualifier);
         if (!resolved) return { action: undefined, obj };
+        // [ADR-0150 D4] Binding first, then owner: the environment's
+        // object-less item does not reach a route another package-less
+        // action of its name is bound to — that route's key is the other
+        // item's, and so is the handler the dispatch reaches there.
+        if ('environment' in qualifier && packagelessActionOnRouteBeside(ql, objectName, actionName, resolved.action) !== undefined) {
+            throw addressedActionNotFoundError(actionName, objectName, actionAddressScope(qualifier));
+        }
         return {
             action: resolved.action,
             obj: obj ?? resolved.obj,
@@ -6338,7 +6789,15 @@ export async function resolveAddressedRouteActionDeclaration(deps: ActionExecuti
         };
     } catch (err: any) {
         if (err instanceof PackageScopedNameRefusedError) return { action: undefined, obj, refusal: err.refusal };
-        if (err?.status === 404) throw err;
+        if (err?.status === 404) {
+            // [#32988] The environment's own item answers its own address
+            // whatever other holders the name has.
+            const own = 'environment' in qualifier
+                ? await environmentItemAtOwnAddress({ ql, objectName, actionName, obj })
+                : undefined;
+            if (own !== undefined) return own;
+            throw err;
+        }
         return { action: undefined, obj, degraded: true, reason: err?.message ?? String(err) };
     }
 }

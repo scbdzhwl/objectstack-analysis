@@ -4,12 +4,14 @@
 /**
  * qa-fixture — the platform checklist's four recurring fixtures, one command each.
  *
- *   node scripts/qa/qa-fixture.mjs contributor-member [--base-url URL] [--email ADDR] [--task]
- *   node scripts/qa/qa-fixture.mjs walled-boot [--posture isolated|group] [--organization SLUG | --no-organization] [--port N] [--dir DIR]
+ *   node scripts/qa/qa-fixture.mjs contributor-member [--base-url URL] [--email ADDR] [--position NAME] [--task]
+ *   node scripts/qa/qa-fixture.mjs walled-boot [--posture isolated|group] [--organization SLUG] [--member-less [EMAIL] | --no-organization] [--port N] [--dir DIR]
  *   node scripts/qa/qa-fixture.mjs external-database [--port N] [--dir DIR]
  *   node scripts/qa/qa-fixture.mjs broken-upstream-app [--variant missing-script|config-fault] [--dir DIR]
  *   node scripts/qa/qa-fixture.mjs restore-upstream --dir DIR
+ *   node scripts/qa/qa-fixture.mjs oidc-stub [--port N] [--dir DIR] [--register [--base-url URL] [--provider-id ID] [--domain DOMAIN] [--groups-claim CLAIM]]
  *   node scripts/qa/qa-fixture.mjs teardown --dir DIR
+ *   node scripts/qa/qa-fixture.mjs --help          (also FIXTURE --help, -h, help: this usage, exit 0, nothing run)
  *
  * Common flags: `--base-url` (default `http://localhost:$OS_PORT`, else :3000),
  * `--admin-email` / `--admin-password` (default the `--seed-admin` pair,
@@ -27,11 +29,20 @@
  *   (`docs/qa/platform-checklist/areas/search.json`), steps 1–5 in order, against
  *   a RUNNING stock boot: invite, invited sign-up, the `showcase_contributor`
  *   position row, the subset proof (zero seeded invoices, INV-1003 not served)
- *   and an own-row invoice. `--task` adds one showcase_task assigned to the
- *   member (records-forms.calendar-interactions steps[2]). Prints the persona's
- *   credentials and ids.
+ *   and an own-row invoice. `--position NAME` then binds one more position by
+ *   the same `sys_user_position` POST step 3 sends, after the subset proof so a
+ *   wider position cannot fail it — `--position showcase_finance` is the
+ *   approvals persona (approvals.account-app-entry), a pending approver on the
+ *   invoice sign-off. A name the security catalog does not hold is refused by
+ *   the server, and the fixture exits 1 naming the answer. `--task` adds one
+ *   showcase_task assigned to the member (records-forms.calendar-interactions
+ *   steps[2]). Prints the persona's credentials and ids.
  * - `walled-boot` — RUNNER.md's "A walled boot is a fixture of its own": boots the
- *   showcase from this tree through `os dev` on its own port and file DB with
+ *   showcase from this tree through `os dev --no-compile --no-watch` on its own
+ *   port and file DB — so it serves the showcase's `dist/objectstack.json` as
+ *   built and neither rewrites that shared artifact nor recompiles it on a
+ *   source save (RUNNER.md, "On a shared checkout, boot with `--no-compile`";
+ *   `os dev` still compiles it when it is missing) — with
  *   `OS_TENANCY_POSTURE`, `OS_PLATFORM_OWNER_EMAIL` and
  *   `OS_AUTH_MEMBERSHIP_POLICY` exported, waits for health and the ready banner,
  *   and proves the wall took: no DEGRADED banner, and `GET /api/v1/auth/config`
@@ -39,6 +50,11 @@
  *   `degradedTenancy: false`. Then the operator creates an organization and
  *   makes it current (`--no-organization` skips it), so its printed session
  *   token can mint walled personas through admin create-user at once.
+ *   `--member-less [EMAIL]` then mints one persona who holds no membership
+ *   (`access-security.no-active-org-session-semantics` producer (1)): created,
+ *   its membership removed by the operator, its forced password change
+ *   cleared, signed in afresh, and proved by a null `activeOrganizationId` and
+ *   an empty `organization/list`.
  * - `external-database` — the credentialed PostgreSQL that
  *   `integration-system.datasource-credential-refusal-matrix` knownGaps[2]
  *   describes: a scratch cluster with scram-sha-256 auth on 127.0.0.1 (TCP only),
@@ -55,6 +71,22 @@
  *   parked beside the copy, the variant steps[4] undoes with `restore-upstream`)
  *   or misconfigured (`config-fault`: the transport kind is one no provider
  *   knows). It prints the boot command; the item times the boot itself.
+ * - `oidc-stub` — the local OIDC identity provider the SSO items' fixtures
+ *   bring (`identity-auth.sso-provider-groups-claim` fixtures.requires[0] and
+ *   knownGaps[0]: no stock OIDC identity provider exists): a detached HTTP
+ *   server on `localhost` that serves a discovery document and a JWKS holding
+ *   one per-run RSA key, which is all `@better-auth/sso` reads to register a
+ *   provider. It serves no interactive sign-in: its authorize, token and
+ *   userinfo endpoints answer 501, so a clause that needs a federated sign-in
+ *   is still not driven by it. It prints what the boot that registers it
+ *   needs exported — `OS_SSO_ENABLED=true` (without it the register door
+ *   answers 404), and only on a boot that is not `os dev` the stub's origin in
+ *   `OS_TRUSTED_ORIGINS` beside the boot's own: the vendor refuses a loopback
+ *   discovery URL that is not a trusted origin (`discovery_private_host`), and
+ *   `os dev` already trusts `http://localhost:*` (`serve.ts`, its `isDev`
+ *   default) — and the `POST /api/v1/auth/admin/sso/register` body. `--register` sends
+ *   that body as the admin to the boot at `--base-url` and proves the provider
+ *   landed by reading it back through `POST /api/v1/auth/admin/sso/get-groups-claim`.
  *
  * Every fixture that leaves a process or a directory behind writes
  * `fixture.json` into its directory, and `teardown --dir DIR` undoes exactly
@@ -72,11 +104,12 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import {
   chmodSync, chownSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync,
   rmSync, statSync, symlinkSync, writeFileSync, openSync,
 } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -190,6 +223,11 @@ async function contributorMember(flags) {
   const admin = adminOf(flags);
   const email = String(flags.email || `qa-contributor-${stamp()}@verify.test`);
   const password = freshSecret();
+  // `--position NAME` takes a value; a bare flag is an input error, refused
+  // before anything is written.
+  if (flags.position !== undefined && (flags.position === true || !String(flags.position).trim())) {
+    throw new Refusal('--position needs a position name, e.g. --position showcase_finance');
+  }
   log(`replaying search:qa-contributor-bound-member against ${base} for ${email}`);
 
   const adminToken = await signIn(base, admin.email, admin.password);
@@ -247,6 +285,26 @@ async function contributorMember(flags) {
   const ownInvoiceId = recordOf(own)?.id;
   expectStatus('step 5: member re-reads the own invoice', await call(base, 'GET', `/api/v1/data/showcase_invoice/${encodeURIComponent(ownInvoiceId)}`, { token: memberToken }), 200);
 
+  // `--position NAME`: one more position row, by the door step 3 used, bound
+  // only after the subset proof above so a wider position cannot fail step 4.
+  // The server refuses a name its security catalog does not hold, so a 201 is
+  // the binding; the admin re-read proves the row was stored as sent.
+  let extraPosition = null;
+  if (flags.position !== undefined) {
+    const name = String(flags.position).trim();
+    const bound = expectStatus(`position: bind ${name}`, await call(base, 'POST', '/api/v1/data/sys_user_position', {
+      token: adminToken, body: { user_id: userId, position: name, organization_id: organizationId },
+    }), 200, 201);
+    const rowId = recordOf(bound)?.id;
+    if (!rowId) throw new StepFailure(`position: bind ${name} answered no row id — ${bound.text.slice(0, 300)}`);
+    const row = recordOf(expectStatus(`position: admin re-reads the ${name} row`,
+      await call(base, 'GET', `/api/v1/data/sys_user_position/${encodeURIComponent(rowId)}`, { token: adminToken }), 200));
+    if (row?.position !== name || row?.user_id !== userId) {
+      throw new StepFailure(`position: the stored row reads position ${row?.position}, user_id ${row?.user_id}; expected ${name}, ${userId}`);
+    }
+    extraPosition = { position: name, rowId };
+  }
+
   // `--task`: one showcase_task assigned to the member, due in three days, for
   // records-forms.calendar-interactions steps[2] (task_own_rows selects
   // `assignee == current_user.email`, examples/app-showcase/src/security/permission-sets.ts).
@@ -272,10 +330,11 @@ async function contributorMember(flags) {
     organizationId,
     invitationId,
     positionRowId,
+    extraPosition,
     invisibleRow: { object: 'showcase_invoice', name: 'INV-1003', id: inv1003.id },
     ownInvoiceId,
     assignedTask,
-    teardown: 'discard the run\'s own file DB, or delete the sys_user_position row and the own invoice (the recipe\'s teardown)',
+    teardown: 'discard the run\'s own file DB, or delete the sys_user_position row(s) and the own invoice (the recipe\'s teardown)',
   };
 }
 
@@ -332,7 +391,13 @@ async function walledBoot(flags) {
     OS_PLATFORM_OWNER_EMAIL: admin.email,
     OS_AUTH_MEMBERSHIP_POLICY: String(flags['membership-policy'] || 'invite-only'),
   };
-  const argv = ['-C', SHOWCASE, 'exec', 'objectstack', 'dev', '--ui', '--seed-admin', '-p', String(port), '-d', `file:${join(dir, 'data.db')}`];
+  // `--no-compile --no-watch`: on a shared checkout a default `os dev` rewrites the
+  // showcase's dist/objectstack.json under every other runner and recompiles it on
+  // a source save (RUNNER.md, "On a shared checkout, boot with `--no-compile`").
+  const argv = [
+    '-C', SHOWCASE, 'exec', 'objectstack', 'dev', '--ui', '--seed-admin', '--no-compile', '--no-watch',
+    '-p', String(port), '-d', `file:${join(dir, 'data.db')}`,
+  ];
   log(`booting the showcase walled (${posture}) on :${port}, DB and log under ${dir}`);
   const out = openSync(logFile, 'a');
   const child = spawn('pnpm', argv, { env, detached: true, stdio: ['ignore', out, out] });
@@ -385,6 +450,61 @@ async function walledBoot(flags) {
     organization = { id: activeId, slug };
   }
 
+  // `--member-less`: a user who holds NO membership, the no-active-org item's
+  // producer (1). Create User always joins the operator's organization (#25626),
+  // so the persona is minted there, the operator (the organization's owner)
+  // removes that membership, and the persona signs in afresh: a removed member is
+  // never bound again by signing in (ADR-0093 D7; packages/qa/dogfood's
+  // membership-decided-at-creation suite drives the same three calls).
+  let memberLess = null;
+  if (flags['member-less']) {
+    if (!organization) throw new Refusal('--member-less needs the operator\'s organization: drop --no-organization');
+    const email = typeof flags['member-less'] === 'string' ? flags['member-less'] : `qa-memberless-${stamp()}@verify.test`;
+    let password = freshSecret();
+    const created = expectStatus(
+      'mint the persona (POST /api/v1/auth/admin/create-user)',
+      await call(base, 'POST', '/api/v1/auth/admin/create-user', { token: operatorToken, body: { email, password, name: 'QA Member-less' } }),
+      200,
+    );
+    const userId = created.json?.data?.user?.id;
+    expectStatus(
+      'remove its membership (POST /api/v1/auth/organization/remove-member)',
+      await call(base, 'POST', '/api/v1/auth/organization/remove-member', {
+        token: operatorToken,
+        body: { memberIdOrEmail: email, organizationId: organization.id },
+      }),
+      200,
+    );
+    // Create User stamps must_change_password, so every data read answers 403
+    // PASSWORD_RESET_REQUIRED until the persona changes it; the change clears the
+    // stamp (stampPasswordChangedAt), and the persona signs in again on the new one.
+    const firstPassword = password;
+    password = freshSecret();
+    expectStatus(
+      'clear the forced change (POST /api/v1/auth/change-password)',
+      await call(base, 'POST', '/api/v1/auth/change-password', {
+        token: await signIn(base, email, firstPassword),
+        body: { currentPassword: firstPassword, newPassword: password, revokeOtherSessions: true },
+      }),
+      200,
+    );
+    const token = await signIn(base, email, password);
+    const read = await call(base, 'GET', '/api/v1/data/showcase_task?limit=1', { token });
+    if (read.json?.error?.code === 'PASSWORD_RESET_REQUIRED') {
+      throw new StepFailure('the persona still answers 403 PASSWORD_RESET_REQUIRED after change-password');
+    }
+    const session = expectStatus('read the persona session', await call(base, 'GET', '/api/v1/auth/get-session', { token }), 200);
+    const memberships = expectStatus('list the persona\'s organizations', await call(base, 'GET', '/api/v1/auth/organization/list', { token }), 200);
+    const held = Array.isArray(memberships.json) ? memberships.json : (memberships.json?.data ?? []);
+    if ((session.json?.session?.activeOrganizationId ?? null) !== null || held.length !== 0) {
+      throw new StepFailure(
+        `the persona is not member-less: activeOrganizationId reads ${session.json?.session?.activeOrganizationId}, `
+        + `organization/list holds ${held.length}`,
+      );
+    }
+    memberLess = { email, password, userId, token, activeOrganizationId: null, organizations: 0, firstDataRead: read.status };
+  }
+
   return {
     fixture: 'walled-boot',
     replays: 'docs/qa/platform-checklist/RUNNER.md, "A walled boot is a fixture of its own"',
@@ -395,6 +515,7 @@ async function walledBoot(flags) {
     operator: admin,
     operatorToken,
     organization,
+    memberLess,
     pid: child.pid,
     dir,
     log: logFile,
@@ -592,6 +713,126 @@ function restoreUpstream(flags) {
   return { fixture: 'broken-upstream-app', restored: join(dir, 'app', MCP_SCRIPT), dir };
 }
 
+// ── oidc-stub ────────────────────────────────────────────────────────────────
+
+/** The discovery document the stub serves at ISSUER/.well-known/openid-configuration. */
+function oidcDiscovery(issuer) {
+  return {
+    issuer,
+    authorization_endpoint: `${issuer}/authorize`,
+    token_endpoint: `${issuer}/token`,
+    userinfo_endpoint: `${issuer}/userinfo`,
+    jwks_uri: `${issuer}/jwks`,
+    response_types_supported: ['code'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    scopes_supported: ['openid', 'email', 'profile'],
+    token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
+    claims_supported: ['sub', 'email', 'name', 'groups'],
+  };
+}
+
+/**
+ * The stub's own process (`_oidc-stub-serve`, spawned detached by `oidc-stub`,
+ * never typed by a runner): serves discovery and the JWKS until its process
+ * group is stopped by `teardown`.
+ */
+function serveOidcStub(flags) {
+  const port = Number(flags.port);
+  const issuer = `http://localhost:${port}`;
+  const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwks = { keys: [{ ...publicKey.export({ format: 'jwk' }), kid: `qa-${stamp()}`, use: 'sig', alg: 'RS256' }] };
+  const discovery = oidcDiscovery(issuer);
+  const server = createHttpServer((req, res) => {
+    const path = new URL(req.url, issuer).pathname;
+    const body = path === '/.well-known/openid-configuration' ? discovery : path === '/jwks' ? jwks : null;
+    log(`${req.method} ${path} → ${body ? 200 : (['/authorize', '/token', '/userinfo'].includes(path) ? 501 : 404)}`);
+    if (body) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    } else if (['/authorize', '/token', '/userinfo'].includes(path)) {
+      res.writeHead(501, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_implemented', error_description: 'qa-fixture oidc-stub serves discovery and JWKS only: no federated sign-in' }));
+    } else {
+      res.writeHead(404).end();
+    }
+  });
+  server.listen(port, 'localhost', () => log(`oidc-stub serving ${issuer}`));
+  return new Promise(() => {});
+}
+
+async function oidcStub(flags) {
+  const port = Number(flags.port || (await freePort()));
+  const dir = newRunDir(flags, 'qa-oidc-stub-');
+  const issuer = `http://localhost:${port}`;
+  const logFile = join(dir, 'oidc-stub.log');
+  const out = openSync(logFile, 'a');
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '_oidc-stub-serve', '--port', String(port)], {
+    detached: true, stdio: ['ignore', out, out],
+  });
+  writeState(dir, { kind: 'oidc-stub', pids: [child.pid], port, issuer, createdAt: new Date().toISOString() });
+  child.unref();
+
+  // The proof is what the vendor reads at register: the four discovery fields it
+  // requires (issuer equal to the registered one), and a JWKS holding a key.
+  let discovery;
+  for (let i = 0; i < 40 && !discovery; i++) {
+    try {
+      const res = await fetch(`${issuer}/.well-known/openid-configuration`);
+      if (res.status === 200) discovery = await res.json();
+    } catch { /* not listening yet */ }
+    if (!discovery) await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!discovery) throw new StepFailure(`the stub never answered ${issuer}/.well-known/openid-configuration — read ${logFile}`);
+  if (discovery.issuer !== issuer || !discovery.authorization_endpoint || !discovery.token_endpoint || !discovery.jwks_uri) {
+    throw new StepFailure(`the stub's discovery document lacks a field @better-auth/sso requires: ${JSON.stringify(discovery)}`);
+  }
+  const jwks = await (await fetch(discovery.jwks_uri)).json();
+  if (!jwks.keys?.[0]?.n || jwks.keys[0].kty !== 'RSA') throw new StepFailure(`the stub's JWKS holds no RSA key: ${JSON.stringify(jwks)}`);
+
+  const base = baseUrlOf(flags);
+  const providerId = String(flags['provider-id'] || `qa-oidc-${stamp()}`);
+  const registerBody = {
+    providerId,
+    issuer,
+    domain: String(flags.domain || `${providerId}.verify.test`),
+    clientId: 'qa-oidc-client',
+    clientSecret: freshSecret(),
+    ...(typeof flags['groups-claim'] === 'string' ? { mapGroups: flags['groups-claim'] } : {}),
+  };
+  let registered = null;
+  if (flags.register) {
+    const token = await signIn(base, adminOf(flags).email, adminOf(flags).password);
+    expectStatus(
+      'register the stub (POST /api/v1/auth/admin/sso/register) — a 404 means the boot lacks OS_SSO_ENABLED=true; a 400 SSO_REGISTER_FAILED naming "not publicly routable" means a boot outside `os dev` lacks the stub origin in OS_TRUSTED_ORIGINS',
+      await call(base, 'POST', '/api/v1/auth/admin/sso/register', { token, body: registerBody }),
+      200,
+    );
+    const readBack = expectStatus(
+      'read the provider back (POST /api/v1/auth/admin/sso/get-groups-claim)',
+      await call(base, 'POST', '/api/v1/auth/admin/sso/get-groups-claim', { token, body: { providerId } }),
+      200,
+    );
+    registered = { providerId, at: base, groupsClaim: readBack.json?.data?.groupsClaim ?? null };
+  }
+
+  return {
+    fixture: 'oidc-stub',
+    replays: 'docs/qa/platform-checklist/areas/identity-auth.json identity-auth.sso-provider-groups-claim fixtures.requires[0]',
+    issuer,
+    discoveryEndpoint: `${issuer}/.well-known/openid-configuration`,
+    bootEnv: { OS_SSO_ENABLED: 'true' },
+    // `os dev` trusts http://localhost:* already; a `serve` / `start` boot does not.
+    bootEnvOutsideOsDev: { OS_SSO_ENABLED: 'true', OS_TRUSTED_ORIGINS: `${base},${issuer}` },
+    registerBody,
+    register: registered ?? `POST ${base}/api/v1/auth/admin/sso/register with registerBody as the admin (or rerun with --register)`,
+    signIn: 'not served: authorize, token and userinfo answer 501 — the stub registers a provider and drives its admin doors, never a federated sign-in',
+    log: logFile,
+    dir,
+    teardown: `node scripts/qa/qa-fixture.mjs teardown --dir ${dir}`,
+  };
+}
+
 // ── teardown ─────────────────────────────────────────────────────────────────
 
 function readState(dir) {
@@ -633,11 +874,38 @@ const COMMANDS = {
   'external-database': externalDatabase,
   'broken-upstream-app': brokenUpstreamApp,
   'restore-upstream': restoreUpstream,
+  'oidc-stub': oidcStub,
   teardown,
 };
 
+/**
+ * The usage `--help` prints: the synopsis and common flags at the top of this
+ * file's header, read from the file itself so the two cannot drift.
+ */
+function usage() {
+  const header = readFileSync(fileURLToPath(import.meta.url), 'utf8').split('## What each one provisions')[0];
+  const lines = header.split('\n').filter((l) => l.startsWith(' *')).map((l) => l.replace(/^ \* ?/, ''));
+  return `${lines.slice(lines.findIndex((l) => l.startsWith('  node scripts/qa/qa-fixture.mjs'))).join('\n').trimEnd()}\n\n`
+    + 'What each fixture provisions, and the exit codes: the header of scripts/qa/qa-fixture.mjs.\n';
+}
+
+/**
+ * A help request anywhere on the line answers the usage and runs nothing. It is
+ * read off the raw arguments, ahead of `parseArgs`, which would otherwise take
+ * `--help` as one more flag and run the fixture named before it.
+ */
+function asksForHelp(argv) {
+  return argv[0] === 'help' || argv.some((a) => a === '--help' || a === '-h');
+}
+
 async function main() {
-  const { command, flags } = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (asksForHelp(argv)) {
+    process.stdout.write(usage());
+    return;
+  }
+  const { command, flags } = parseArgs(argv);
+  if (command === '_oidc-stub-serve') return serveOidcStub(flags);
   const run = COMMANDS[command];
   if (!run) throw new Refusal(`unknown fixture "${command ?? ''}": one of ${Object.keys(COMMANDS).join(', ')}`);
   const result = await run(flags);

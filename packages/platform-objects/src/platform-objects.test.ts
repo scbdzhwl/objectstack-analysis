@@ -287,7 +287,7 @@ describe('@objectstack/platform-objects', () => {
       ]);
     });
 
-    it('SysSsoProvider register_sso_provider collects the fields the register bridge reads, under the bridge\'s names (#32297)', () => {
+    it('SysSsoProvider register_sso_provider collects the fields the register bridge reads, under the bridge\'s names (#32297, #33395)', () => {
       // The bridge (plugin-auth `register-sso-provider.ts`,
       // `runRegisterSsoProviderFromForm`) reads these flat body members and
       // nothing else; a param under another name is dropped on the wire. The
@@ -302,6 +302,9 @@ describe('@objectstack/platform-objects', () => {
         ['clientId', 'text', true],
         ['clientSecret', 'password', true],
         ['discoveryEndpoint', 'url', false],
+        ['authorizationEndpoint', 'url', false],
+        ['tokenEndpoint', 'url', false],
+        ['jwksEndpoint', 'url', false],
         ['userInfoEndpoint', 'url', false],
         ['skipUserInfo', 'boolean', false],
         ['scopes', 'text', false],
@@ -321,8 +324,8 @@ describe('@objectstack/platform-objects', () => {
       // The Entra ID mapping is suggested in words, beside the issuer host it applies to.
       expect(help('mapEmail')).toContain('login.microsoftonline.com');
       expect(help('mapEmail')).toContain('"preferred_username"');
-      // Both nameable endpoints say a named endpoint is trusted for this provider.
-      for (const name of ['discoveryEndpoint', 'userInfoEndpoint']) {
+      // Every nameable endpoint says a named endpoint is trusted for this provider.
+      for (const name of ['discoveryEndpoint', 'authorizationEndpoint', 'tokenEndpoint', 'jwksEndpoint', 'userInfoEndpoint']) {
         expect(help(name), name).toContain('An endpoint named here is trusted for this provider');
       }
     });
@@ -736,6 +739,8 @@ describe('feature-gate lowering matrix (#2874)', () => {
   // through `requiresFeature`, so this gate is authored in `visible` and both
   // lowerings compose after it.
   const MANAGED = 'features.cloudManaged != true';
+  // ...and offers the two doors that add a pending person, there only.
+  const MANAGED_ON = 'has(features.cloudManaged) && features.cloudManaged == true';
 
   const rows: Array<[string, { actions?: readonly { name?: string; visible?: unknown; params?: readonly unknown[] }[] }, string, string]> = [
     ['SysOrganization', SysOrganization, 'create_organization', MULTI_ORG],
@@ -750,6 +755,11 @@ describe('feature-gate lowering matrix (#2874)', () => {
     ['SysOrganization', SysOrganization, 'leave_organization', MULTI_ORG],
     ['SysUser', SysUser, 'invite_user', `((${MANAGED}) && ${INVITE}) && ${ORG}`],
     ['SysUser', SysUser, 'create_user', `(${STANDING} && ${MANAGED}) && features.admin == true`],
+    // Their managed counterparts carry no feature gate (their doors mount
+    // without the admin plugin), so the authored predicate is served as
+    // written: the standing, then the managed flag ON, guarded by `has()`.
+    ['SysUser', SysUser, 'add_sso_user', `${STANDING} && ${MANAGED_ON}`],
+    ['SysUser', SysUser, 'import_sso_users', `${STANDING} && ${MANAGED_ON}`],
     // [#11544] Third mirror of `invite_user` — the Members tab's own copy of
     // the email-invite entry. Same gate as the sys_user / sys_invitation rows.
     ['SysMember', SysMember, 'invite_user', `((${MANAGED}) && ${INVITE}) && ${ORG}`],
@@ -762,7 +772,7 @@ describe('feature-gate lowering matrix (#2874)', () => {
     // The rest of the platform-admin family. Three carry no feature gate, so
     // the authored predicate is served as written — no lowering — and is
     // pinned here anyway, beside add_member, so every member has its row.
-    ['SysUser', SysUser, 'set_user_manager', `${STANDING} && has(record.source) && record.source != "idp_provisioned"`],
+    ['SysUser', SysUser, 'set_user_manager', STANDING],
     ['SysSsoProvider', SysSsoProvider, 'register_sso_provider', STANDING],
     ['SysSsoProvider', SysSsoProvider, 'register_saml_provider', STANDING],
     ['SysSsoProvider', SysSsoProvider, 'request_domain_verification', STANDING],
@@ -776,7 +786,7 @@ describe('feature-gate lowering matrix (#2874)', () => {
     ['SysMember', SysMember, 'transfer_ownership', `((has(record.role) && record.role != 'owner') && ${OWNER}) && ${ORG}`],
     ['SysInvitation', SysInvitation, 'invite_user', `((${MANAGED}) && ${INVITE}) && ${ORG}`],
     ['SysInvitation', SysInvitation, 'cancel_invitation', `${ADMINS} && ${ORG}`],
-    ['SysInvitation', SysInvitation, 'resend_invitation', `${INVITE} && ${ORG}`],
+    ['SysInvitation', SysInvitation, 'resend_invitation', `((${MANAGED}) && ${INVITE}) && ${ORG}`],
     ['SysTeam', SysTeam, 'create_team', `${ADMINS} && ${ORG}`],
     ['SysTeam', SysTeam, 'update_team', `${ADMINS} && ${ORG}`],
     ['SysTeam', SysTeam, 'remove_team', `${ADMINS} && ${ORG}`],
@@ -788,8 +798,10 @@ describe('feature-gate lowering matrix (#2874)', () => {
     // Their doors are platform-admin gated, so the standing leads.
     // The three also read the row's state after the standing (the
     // evaluated truth tables are `identity/action-state-visibility.test.ts`).
-    ['SysUser', SysUser, 'ban_user', `(${STANDING} && has(record.banned) && record.banned != true) && features.admin == true`],
-    ['SysUser', SysUser, 'unban_user', `(${STANDING} && has(record.banned) && record.banned == true) && features.admin == true`],
+    // Ban / Unban carry no `admin` gate: their doors work without the plugin,
+    // so nothing is lowered onto the hand-written predicate.
+    ['SysUser', SysUser, 'ban_user', `${STANDING} && has(record.banned) && record.banned != true`],
+    ['SysUser', SysUser, 'unban_user', `${STANDING} && has(record.banned) && record.banned == true`],
     ['SysUser', SysUser, 'unlock_user', `(${STANDING} && ((has(record.locked_until) && record.locked_until != null) || (has(record.two_factor_enabled) && record.two_factor_enabled == true))) && features.admin == true`],
     ['SysUser', SysUser, 'set_user_password', `(${STANDING} && ${MANAGED}) && features.admin == true`],
     ['SysUser', SysUser, 'impersonate_user', `(${STANDING}) && features.admin == true`],

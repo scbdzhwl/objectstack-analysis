@@ -86,7 +86,8 @@
  * [#25521 cut 17] The movable members of the class's data-lifecycle rotation
  * sub-banner joined them the same way: `ensureRotation`, which inventories a
  * rotation-managed table's shards, adopts a legacy base table, column-syncs
- * the retained shards, drops the expired ones and rebuilds the read view, with
+ * the retained shards, drops the expired ones (on the Rotator's call only) and
+ * rebuilds the read view, with
  * `rotationShardKey` and `rotationColumnList`, which it calls;
  * `warnBuiltinColumnCollisions`, the warning the create, alter and shard paths
  * share when a declared field collides with a builtin column; and
@@ -1532,6 +1533,39 @@ export async function applyPublishedColumnChanges(this: Pick<SchemaSyncHost, 'ap
 }
 
 /**
+ * [#33724] Is this drift entry a relax the install of a package applies? The
+ * `needs_confirm` relax of a NOT NULL column whose field declares `storage: {
+ * notNull: false }` in words — the entry {@link isPublishedColumnChange} selects
+ * for a publish — and only on a column the caller names: the ones the
+ * installing package's own declaration says so for.
+ */
+function isInstallRelaxation(d: ManagedDriftEntry, fields: Record<string, any> | undefined, columns: ReadonlySet<string>): boolean {
+  return d.op.type === 'relax_not_null' && d.category === 'needs_confirm'
+    && columns.has(d.op.column) && fields?.[d.op.column]?.storage?.notNull === false;
+}
+
+/** The body of `SqlDriver#relaxDeclaredNotNull`; the method's docblock there is its contract. */
+export async function relaxDeclaredNotNull(this: Pick<SchemaSyncHost, 'applyMigrationEntries' | 'deferredDdl' | 'detectManagedDrift' | 'logger'>, obj: { name: string; fields?: Record<string, any>; indexes?: any[] }, columns: Iterable<string>, opts: { packageId?: string } = {}): Promise<{ applied: ManagedDriftEntry[]; skipped: ManagedDriftEntry[] }> {
+  // A deferred-DDL driver (`os migrate plan`) runs no schema work.
+  if (this.deferredDdl) return { applied: [], skipped: [] };
+  const named = new Set(columns);
+  if (named.size === 0) return { applied: [], skipped: [] };
+  // Through the public doors, as {@link applyPublishedColumnChanges} reads and
+  // applies: a face that applies over another transport answers for itself.
+  const drift = await this.detectManagedDrift([obj]);
+  const changes = drift.filter((d) => isInstallRelaxation(d, obj.fields, named));
+  if (changes.length === 0) return { applied: [], skipped: [] };
+  const result = await this.applyMigrationEntries(changes, { allowDestructive: false });
+  const by = opts.packageId ? `the install of package '${opts.packageId}'` : 'the package install';
+  for (const d of result.applied) {
+    const line = `[schema-drift] ${by} applied ${d.op.type} on ${d.table}.${d.column ?? ''}`;
+    if (this.logger.info) this.logger.info(line);
+    else this.logger.warn(line);
+  }
+  return result;
+}
+
+/**
  * The body of `SqlDriver#applyMigrationEntries`; the method's docblock there is
  * its contract.
  *
@@ -2106,7 +2140,7 @@ export function rotationShardKey(nowMs: number, unit: 'day' | 'week' | 'month'):
 }
 
 /** The body of `SqlDriver#ensureRotation`; the method's docblock there is its contract. */
-export async function ensureRotation(this: Pick<SchemaSyncHost, 'aliasShardBookkeeping' | 'ensureShardTable' | 'knex' | 'logger' | 'rotationColumnList' | 'rotationShardKey' | 'rotationStateByTable'>, tableName: string, obj: { name: string; fields?: Record<string, any>; tenancy?: any; indexes?: any[] }, policy: { shards: number; unit: 'day' | 'week' | 'month' }, nowMs: number = Date.now()): Promise<{ object: string; current: string; shards: string[]; dropped: string[] }> {
+export async function ensureRotation(this: Pick<SchemaSyncHost, 'aliasShardBookkeeping' | 'ensureShardTable' | 'knex' | 'logger' | 'rotationColumnList' | 'rotationShardKey' | 'rotationStateByTable'>, tableName: string, obj: { name: string; fields?: Record<string, any>; tenancy?: any; indexes?: any[] }, policy: { shards: number; unit: 'day' | 'week' | 'month' }, nowMs: number = Date.now(), dropExpired: boolean = false): Promise<{ object: string; current: string; shards: string[]; dropped: string[] }> {
   const current = `${tableName}__r${this.rotationShardKey(nowMs, policy.unit)}`;
 
   // Physical inventory: the base name (table before adoption, view after)
@@ -2144,8 +2178,19 @@ export async function ensureRotation(this: Pick<SchemaSyncHost, 'aliasShardBookk
   const oldestRetainedKey = this.rotationShardKey(nowMs - (Math.max(1, policy.shards) - 1) * unitMs, policy.unit);
   const parsed = [...shardNames].sort((a, b) => b.localeCompare(a));
   const keyOf = (n: string) => n.slice(tableName.length + 3);
-  const retained = parsed.filter((n) => keyOf(n) >= oldestRetainedKey);
-  const dropped = parsed.filter((n) => keyOf(n) < oldestRetainedKey);
+  const expired = parsed.filter((n) => keyOf(n) < oldestRetainedKey);
+  // Expiry is the Rotator's alone: the lifecycle sweep's `rotateShards` passes
+  // `dropExpired`. Schema sync (`initObjects`) never DROPs a shard: it runs
+  // on every boot BEFORE that boot is judged — the organization-ownership
+  // guard refuses only after the engine's sync — and on every one-shot CLI
+  // boot, which arms no sweep. A shard a restore brought back, past the window
+  // only because the dump is old, then went with the boot that refused to
+  // serve it. Left to the sweep, an expired shard stays in the read view, its
+  // columns synced with the rest, until the first sweep of a served boot drops
+  // it — at most one sweep interval past its window, the same tolerance the
+  // sweep's own schedule has.
+  const retained = dropExpired ? parsed.filter((n) => keyOf(n) >= oldestRetainedKey) : parsed;
+  const dropped = dropExpired ? expired : [];
 
   // Column-sync every retained shard (creates the current one; adds any
   // newly declared columns to older shards so the UNION stays uniform).
@@ -2171,6 +2216,11 @@ export async function ensureRotation(this: Pick<SchemaSyncHost, 'aliasShardBookk
   if (dropped.length > 0) {
     (this.logger as { info?: (msg: string) => void }).info?.(
       `[sql-driver] rotated ${tableName}: ${retained.length} shard(s) live, dropped ${dropped.join(', ')}`,
+    );
+  } else if (!dropExpired && expired.length > 0) {
+    (this.logger as { info?: (msg: string) => void }).info?.(
+      `[sql-driver] ${tableName}: ${expired.join(', ')} past the rotation window, kept for the lifecycle sweep ` +
+        'to drop once this boot is served',
     );
   }
   return { object: tableName, current, shards: retained, dropped };

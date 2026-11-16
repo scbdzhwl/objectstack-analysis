@@ -3,8 +3,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { assertEngineUpdateDispatch } from '@objectstack/objectql';
 import { SysUser } from '@objectstack/platform-objects/identity';
-import { validationFailure } from '@objectstack/types';
+import { validationFailure, INTERNAL_ERROR_MESSAGE } from '@objectstack/types';
 import {
+  mapAuthApiError,
   runAdminCreateUser,
   runAdminSetUserPassword,
   generateTemporaryPassword,
@@ -451,21 +452,35 @@ describe('runAdminCreateUser', () => {
     expect(m.engineInsert.mock.calls.some((c) => c[0] === 'sys_member')).toBe(false);
   });
 
-  it('is idempotent when a membership already exists', async () => {
-    const m = makeDepsWithOrgs({
-      orgs: [{ id: 'org_only' }],
-      members: [{ organization_id: 'org_only', user_id: 'user-9' }],
+  // The `user.create.after` reconciler (the bootstrap join) binds the new user
+  // DURING `createUser`, so the endpoint's own reconcile finds the row and
+  // yields. The account did not exist before this call, so that row is this
+  // creation's membership: the answer and the audit row both say `true`. It
+  // used to answer `false` here while `sys_member` held the row, which read as
+  // "a member-less account was created".
+  it('the bootstrap join already bound the new user: no second insert, membershipCreated true in the answer and the audit row', async () => {
+    const members: Array<{ organization_id: string; user_id: string }> = [];
+    const m = makeDepsWithOrgs({ orgs: [{ id: 'org_only' }], members });
+    const createUser = vi.fn(async ({ body }: any) => {
+      members.push({ organization_id: 'org_only', user_id: 'user-9' }); // the hook's bind
+      return { user: { id: 'user-9', email: body.email, name: body.name } };
     });
+    m.deps.getAuthApi = async () => ({ createUser }) as any;
     const res = await runAdminCreateUser(
       m.deps,
       makeRequest({ email: 'a@b.co', generatePassword: true }),
       ACTOR,
     );
     expect(res.status).toBe(200);
+    expect(createUser).toHaveBeenCalledTimes(1);
     const data = res.body.data as any;
     expect(data.organizationId).toBe('org_only');
-    expect(data.membershipCreated).toBe(false);
-    expect(m.engineInsert.mock.calls.some((c) => c[0] === 'sys_member')).toBe(false);
+    expect(data.membershipCreated).toBe(true);
+    // The endpoint wrote no second row: one membership, the hook's.
+    expect(callsOf(m.engineInsert).some((c) => c[0] === 'sys_member')).toBe(false);
+    const auditRow = callsOf(m.engineInsert).find((c) => c[0] === 'sys_audit_log')?.[1];
+    expect(auditRow).toBeTruthy();
+    expect(JSON.parse(auditRow.metadata)).toMatchObject({ organizationId: 'org_only', membershipCreated: true });
   });
 
   it('does not fail account creation when the membership bind throws', async () => {
@@ -1521,7 +1536,10 @@ describe('create-user in multi-org mode: the new user joins the administrator\'s
     expect(j.addMember).not.toHaveBeenCalled();
   });
 
-  it('a membership already there is respected: no second addMember, membershipCreated false', async () => {
+  // The account is brand-new, so a row in the current organization was written
+  // during this creation (a host's `user.create.after` hook): it is reported as
+  // this creation's membership, the same rule the single-org bind answers by.
+  it('a membership written during the creation is respected: no second addMember, membershipCreated true in the answer and the audit row', async () => {
     const j = makeJoinDeps({
       callerActiveOrg: 'org_current',
       members: [{ organization_id: 'org_current', user_id: 'user-9' }],
@@ -1529,7 +1547,9 @@ describe('create-user in multi-org mode: the new user joins the administrator\'s
     const res = await runAdminCreateUser(j.deps, makeRequest({ email: 'e@b.co', password: 'Explicit1!' }), ACTOR);
     expect(res.status).toBe(200);
     expect(j.addMember).not.toHaveBeenCalled();
-    expect(res.body.data).toMatchObject({ organizationId: 'org_current', membershipCreated: false });
+    expect(res.body.data).toMatchObject({ organizationId: 'org_current', membershipCreated: true });
+    const audit = callsOf(j.engineInsert).find(([object]) => object === 'sys_audit_log')![1];
+    expect(JSON.parse(audit.metadata)).toMatchObject({ organizationId: 'org_current', membershipCreated: true });
   });
 
   it('refused by the vendor: its status and code, the account rolls back, nothing is audited', async () => {
@@ -1625,5 +1645,97 @@ describe("create-user: the must_change_password stamp names the administrator th
     const bare = makeDeps();
     expect((await runAdminCreateUser(bare.deps, makeRequest({ email: 'new.user@example.com', generatePassword: true }), ACTOR)).status).toBe(200);
     expect(stampContext(bare)).toEqual({ isSystem: true, positions: [], permissions: [] });
+  });
+});
+
+// ── An unclassified internal failure is answered with the generic message ──
+//
+// The rule every route catch in auth-plugin.ts already applies, held at the
+// shared result mapper the admin user doors answer through: a failure that
+// carries no vendor code is answered `INTERNAL_ERROR` in the generic words
+// and logged once at error level with the route named; a refusal the vendor
+// classifies (a body code) keeps its own message and status.
+describe('an unclassified internal failure is answered with the generic message and logged once', () => {
+  const MARKER = 'unclassified-failure-marker-9c42';
+
+  function withLogger() {
+    const m = makeDeps();
+    const error = vi.fn();
+    m.deps.logger = { warn: m.warn, error };
+    return { m, error };
+  }
+
+  it('the shared mapper: no vendor code answers INTERNAL_ERROR in the generic words, and the logger receives the error once', () => {
+    const thrown = new Error(`adapter failed ${MARKER}`);
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const result = mapAuthApiError(thrown, 'create-user failed', logger);
+    expect(result).toEqual({
+      status: 500,
+      body: { success: false, error: { code: 'INTERNAL_ERROR', message: INTERNAL_ERROR_MESSAGE } },
+    });
+    expect(JSON.stringify(result)).not.toContain(MARKER);
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith('[AuthPlugin] create-user failed', thrown);
+  });
+
+  it('create-user: a vendor call that fails without a code answers the generic message', async () => {
+    const { m, error } = withLogger();
+    m.createUser.mockRejectedValueOnce(new Error(`adapter failed ${MARKER}`));
+    const res = await runAdminCreateUser(m.deps, makeRequest({ email: 'a@b.co', generatePassword: true }), ACTOR);
+    expect(res.status).toBe(500);
+    expect(res.body.error).toEqual({ code: 'INTERNAL_ERROR', message: INTERNAL_ERROR_MESSAGE });
+    expect(JSON.stringify(res)).not.toContain(MARKER);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0][0]).toBe('[AuthPlugin] create-user failed');
+  });
+
+  it('set-user-password: a credential write that fails without a code answers the generic message', async () => {
+    const { m, error } = withLogger();
+    m.authCtx.internalAdapter.updatePassword.mockRejectedValueOnce(new Error(`adapter failed ${MARKER}`));
+    const res = await runAdminSetUserPassword(m.deps, makeRequest({ userId: 'user-9', newPassword: 'Str0ng!Pass' }), ACTOR);
+    expect(res.status).toBe(500);
+    expect(res.body.error).toEqual({ code: 'INTERNAL_ERROR', message: INTERNAL_ERROR_MESSAGE });
+    expect(JSON.stringify(res)).not.toContain(MARKER);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0][0]).toBe('[AuthPlugin] set-user-password failed');
+  });
+
+  it('CONTROL: a refusal the vendor classifies keeps its own message and status, and is not logged', async () => {
+    const { m, error } = withLogger();
+    m.createUser.mockRejectedValueOnce({
+      statusCode: 400,
+      body: { code: 'USER_ALREADY_EXISTS', message: 'User already exists' },
+    });
+    const res = await runAdminCreateUser(m.deps, makeRequest({ email: 'a@b.co', generatePassword: true }), ACTOR);
+    expect(res).toEqual({
+      status: 409,
+      body: { success: false, error: { code: 'USER_ALREADY_EXISTS', message: 'User already exists' } },
+    });
+    expect(error).not.toHaveBeenCalled();
+
+    const direct = mapAuthApiError(
+      { statusCode: 403, body: { code: 'YOU_ARE_NOT_ALLOWED_TO_CREATE_USERS', message: 'You are not allowed to create users' } },
+      'create-user failed',
+      { warn: m.warn, error },
+    );
+    expect(direct).toEqual({
+      status: 403,
+      body: { success: false, error: { code: 'YOU_ARE_NOT_ALLOWED_TO_CREATE_USERS', message: 'You are not allowed to create users' } },
+    });
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: a throw whose status addresses the caller (4xx) keeps its own answer, and is not logged', () => {
+    const error = vi.fn();
+    const result = mapAuthApiError(
+      Object.assign(new Error('The email domain is not accepted here.'), { statusCode: 400 }),
+      'create-user failed',
+      { warn: vi.fn(), error },
+    );
+    expect(result).toEqual({
+      status: 400,
+      body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'The email domain is not accepted here.' } },
+    });
+    expect(error).not.toHaveBeenCalled();
   });
 });

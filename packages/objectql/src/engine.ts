@@ -244,6 +244,7 @@ import { stripReadonlyFields, staticReadonlyInsertSubject } from './validation/r
 // and points at `ctx.previous` — the module owns the measurement and the
 // reason the explanation cannot be composed any further downstream.
 import { UnscopedHookApi, SEED_USER_GRANTS, APP_AUTHORED_HOOK_API, type HookRunAs, type HookRunAsRef, type RunAsDerivableApi } from './hook-run-as.js';
+import { DETACHED_HOOK_RUN, type UNIT_ROLLED_BACK, type UnitCommitQueue } from './unit-detach.js';
 // [#6457] The master-detail header a `parent`-scoped predicate reads is made
 // total over the MASTER's declared fields before it leaves this engine — the
 // same helper every other server seam materialises with (#1871/#4649/#4953).
@@ -416,6 +417,12 @@ export class ObjectQL implements IObjectQLEngine {
      * caller populated, so every reader must treat it as optional.
      */
     scope?: TransactionScope;
+    /**
+     * [#33760] The `async: true` after-hook runs waiting for this unit's
+     * commit, when its owner opened one (`unit-detach.ts`). Absent where the
+     * entry's unit has no owner here to settle it, as `scope` is.
+     */
+    commitQueue?: UnitCommitQueue;
   }>();
 
   /**
@@ -426,7 +433,7 @@ export class ObjectQL implements IObjectQLEngine {
    * here ({@link isClosedUnitHandle}). Weak, so a finished unit's handle stays
    * collectable.
    */
-  private readonly openedUnits = new WeakMap<object, { transaction: unknown }>();
+  private readonly openedUnits = new WeakMap<object, { transaction: unknown; commitQueue?: UnitCommitQueue }>();
 
   /**
    * [#22305] The {@link CascadeDeleteSet} of the by-id cascade delete in
@@ -620,6 +627,7 @@ export class ObjectQL implements IObjectQLEngine {
     getTranslations?: (locale: string) => Record<string, unknown>;
     getFallbackLocale?: () => string | undefined;
     getDefaultLocale?: () => string | undefined;
+    getSourceLocale?: () => string | undefined;
   };
 
   // Crypto provider backing `secret`-typed fields. Optional: when absent,
@@ -761,13 +769,16 @@ export class ObjectQL implements IObjectQLEngine {
 
   /**
    * Look up a registered function by name, with no package: the last
-   * registration of the name. [ADR-0150 D3/D4, #31700; epic seat ruling R2-C]
-   * A name two packages hold (two namespaces may each bind one) is refused,
-   * `409 RESOURCE_CONFLICT` naming every holder, never answered with one of
-   * them; a reader that knows its package resolves through
-   * {@link functionHoldersOf}.
+   * registration of the name. [ADR-0150 D3/D4, #31700, #32907; epic seat
+   * ruling R2-C] A name two holders hold — two packages (two namespaces may
+   * each bind one), or the platform (an owner-less registration) beside a
+   * package — is refused, `409 RESOURCE_CONFLICT` naming every holder, never
+   * answered with one of them, whichever registered last. [#32933] A disabled
+   * package is counted as a holder and never answered: a name only a disabled
+   * package holds answers nothing. A reader that knows its package resolves
+   * through {@link functionHoldersOf}.
    *
-   * @throws {PackageScopedNameRefusedError} for a name two packages hold.
+   * @throws {PackageScopedNameRefusedError} for a name two holders hold.
    */
   resolveFunction(name: string): HookHandler | undefined {
     // [#29986 codemod] The body moved to `engine-hooks-and-functions.ts` (see `HooksAndFunctionsHost`).
@@ -780,9 +791,10 @@ export class ObjectQL implements IObjectQLEngine {
    * it"; a caller that must also report what the call did (the automation
    * engine's `script` node, feeding the #4354 run summary) needs the
    * declaration, and reading it off the same registry keeps the two from
-   * drifting. Refused alike for a name two packages hold (above).
+   * drifting. Refused alike for a name two holders hold, and answers nothing
+   * alike for a name only a disabled package holds (above).
    *
-   * @throws {PackageScopedNameRefusedError} for a name two packages hold.
+   * @throws {PackageScopedNameRefusedError} for a name two holders hold.
    */
   resolveFunctionEntry(name: string): Readonly<FunctionEntry> | undefined {
     // [#29986 codemod] The body moved to `engine-hooks-and-functions.ts` (see `HooksAndFunctionsHost`).
@@ -799,7 +811,7 @@ export class ObjectQL implements IObjectQLEngine {
    * `script` node resolves through it (#32073), and `bindHooksToEngine` reads
    * a hook's own package's entry from it. `resolveFunction` and
    * `resolveFunctionEntry` answer the one last-registered entry per name, and
-   * refuse a name two packages hold (#31700).
+   * refuse a name two holders hold (#31700, #32907).
    */
   functionHoldersOf(name: string): PackageScopedHolderSource<Readonly<FunctionEntry>> {
     // [#31716] The body lives in `engine-hooks-and-functions.ts` (see `HooksAndFunctionsHost`).
@@ -1121,6 +1133,17 @@ export class ObjectQL implements IObjectQLEngine {
    * package's is replaced by that package's again, rather than leaving the
    * key empty; a package removed from beneath an override leaves the
    * override bound, with nothing beneath it to restore.
+   *
+   * [ADR-0150 D4/D5] A key whose unqualified handler was the removed
+   * package's while another owner still holds a handler under it in its own
+   * slot runs one remaining holder's handler for a call that names no
+   * package, rather than "not found", and stays in the unqualified
+   * {@link listRegisteredActions}; the bare-call ambiguity rule still
+   * refuses it while two or more packages hold the key. The holder is the
+   * last coordinate holding the key in slot-creation order, not the last
+   * registration of that key: with host code beside one package on an
+   * object-bound key it can be the package's where a restart runs host
+   * code's.
    */
   removeActionsByPackage(packageName: string): void {
     // [#29986 codemod] The body moved to `engine-actions.ts` (see `ActionsHost`).
@@ -1539,7 +1562,9 @@ export class ObjectQL implements IObjectQLEngine {
     ancestors: readonly string[],
   ): Promise<N> {
     // [#25522 cut 15] The body moved to `engine-readable-ids-permission-formula.ts`, its docblock with it (see `ReadableIdsPermissionFormulaHost`).
+    const readRegistry = () => this._registry;
     const host: ThisParameterType<typeof composeReadableIdsChain> = {
+      get _registry() { return readRegistry(); },
       refuseUncomposableReadableIdsClasses: (...a) => this.refuseUncomposableReadableIdsClasses(...a),
       readableIdsScopeOf: (...a) => this.readableIdsScopeOf(...a),
       composeReadableIdsChain: (...a) => this.composeReadableIdsChain(...a),
@@ -2526,6 +2551,7 @@ export class ObjectQL implements IObjectQLEngine {
     getTranslations?: (locale: string) => Record<string, unknown>;
     getFallbackLocale?: () => string | undefined;
     getDefaultLocale?: () => string | undefined;
+    getSourceLocale?: () => string | undefined;
   }): void {
     // [#29986 codemod] The body moved to `engine-references-and-master-detail.ts` (see `ReferencesAndMasterDetailHost`).
     return ReferencesAndMasterDetailFacet.setI18nService.call(referencesAndMasterDetailHost.of(this), service);
@@ -4968,6 +4994,7 @@ export class ObjectQL implements IObjectQLEngine {
       update: (...a) => this.update(...a),
       recomputeSummaries: (...a) => this.recomputeSummaries(...a),
       publishDataEvent: (...a) => this.publishDataEvent(...a),
+      validationMessageContext: (...a) => this.validationMessageContext(...a),
     };
     return restoreRecycleBinEntry.call(host, entryId, options);
   }
@@ -5303,8 +5330,14 @@ export class ObjectQL implements IObjectQLEngine {
    *   from a transport that inherited one it cannot honour (#18063) — the
    *   callback
    *   runs directly with the supplied base context (no rollback). This keeps
-   *   the API safe to call on drivers without ACID support (e.g. the
-   *   in-memory driver in tests). It is DECLARED behaviour (ADR-0119 D1), not
+   *   the API safe to call on drivers that cannot roll back (a test double
+   *   with no `beginTransaction`, remote Turso, OData). The in-memory driver
+   *   is not one: it implements `beginTransaction` / `rollback` over a
+   *   snapshot of its whole store, so the callback runs inside a
+   *   transaction there, with no isolation: its rollback restores the whole
+   *   store to its state at begin, discarding what other callers wrote since
+   *   then too (unsafe with concurrent writers). The
+   *   degrade is DECLARED behaviour (ADR-0119 D1), not
    *   a bug to be discovered — but since v17 it is no longer *silent*: the
    *   degrade warns once per driver (#4619, {@link warnTransactionUnsupported}),
    *   and a caller who cannot live with it says so with `opts.require: true`,
@@ -5344,9 +5377,9 @@ export class ObjectQL implements IObjectQLEngine {
     return (TransactionsSectionFacet.transaction<T>).call(transactionsSectionHost.of(this), callback, baseContext, opts);
   }
 
-  private runOpenedUnit<T>(trx: unknown, owner: IDataDriver, body: () => Promise<T>): Promise<T> {
+  private runOpenedUnit<T>(trx: unknown, owner: IDataDriver, body: () => Promise<T>, commitQueue?: UnitCommitQueue): Promise<T> {
     // [#29986 codemod] The body moved to `engine-transactions-section.ts`, its docblock with it (see `TransactionsSectionHost`).
-    return (TransactionsSectionFacet.runOpenedUnit<T>).call(transactionsSectionHost.of(this), trx, owner, body);
+    return (TransactionsSectionFacet.runOpenedUnit<T>).call(transactionsSectionHost.of(this), trx, owner, body, commitQueue);
   }
 
   private isClosedUnitHandle(handle: unknown): boolean {
@@ -6503,6 +6536,25 @@ export class ScopedContext implements IScopedContext, RunAsDerivableApi {
   [SEED_USER_GRANTS](opts?: { membershipUnread?: true }): Promise<ScopedContext> {
     // [#30052 codemod] The body moved to `engine-scoped-context.ts` (see `ScopedContextHost`).
     return ScopedContextFacet.seedUserGrants.call(scopedContextHost.of(this), opts);
+  }
+
+  /**
+   * [#33651] Run an `async: true` hook's `body` outside every unit of work open
+   * for this api: out of the engine's ambient store, with that unit's handle
+   * and the one this api carries treated as closed for the run
+   * (`runOutsideOpenUnits`, `unit-detach.ts`). Called by `wrapDeclarativeHook`
+   * when such a hook detaches, so its writes never enrol in a unit that
+   * commits under them. [#33760] With `waitForCommit` (a write event's run,
+   * `waitsForUnitCommit`), started once the unit it was dispatched in
+   * commits, and answering `UNIT_ROLLED_BACK` without running when that unit
+   * rolls back (`runOutsideOpenUnitsOnCommit`); at once outside any unit, and
+   * at once for any other event (`afterFind`).
+   *
+   * Keyed on {@link DETACHED_HOOK_RUN}, a symbol the package entry does not
+   * export, so it is no nameable member of this class's published face.
+   */
+  [DETACHED_HOOK_RUN]<T>(body: () => Promise<T>, waitForCommit: boolean): Promise<T | typeof UNIT_ROLLED_BACK> {
+    return (ScopedContextFacet.detachedHookRun<T>).call(scopedContextHost.of(this), body, waitForCommit);
   }
 
   /**

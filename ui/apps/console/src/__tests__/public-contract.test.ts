@@ -44,6 +44,11 @@ import { ComponentPropsMap } from '@objectstack/spec/ui';
 import '@object-ui/components';
 // … and the console's own plugin layer, from the module main.tsx boots from.
 import '../register-plugins';
+// `@object-ui/plugin-form` too: the console registers its tags as lazy stubs
+// since its first load stopped carrying the package (objectstack#33581), and
+// the reverse direction below reads `record:line_items`'s `inputs`, which a
+// stub does not carry. `EXPECTED_LAZY` therefore stays the list it was.
+import '@object-ui/plugin-form';
 
 /**
  * Every curated tag the console makes available, in `PUBLIC_BLOCKS` order.
@@ -144,6 +149,7 @@ const EXPECTED_UNIMPLEMENTED: string[] = [];
  * plugins below, move that tag out of this list — it is still covered.
  */
 const EXPECTED_LAZY = [
+  'list-view',
   'object-kanban',
   'object-calendar',
   'object-gantt',

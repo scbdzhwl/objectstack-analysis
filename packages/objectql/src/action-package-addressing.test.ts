@@ -209,3 +209,204 @@ describe.each([
     expect(resolve('account', 'approve', B)).toMatchObject({ status: 'resolved', via: 'own', holder: { kind: 'package', packageId: B } });
   });
 });
+
+/**
+ * ADR-0150 D4: an action is identified by `(package, owning object, name)`, so
+ * a package-less action customizes a package's action only on that action's
+ * owner key. On another object it is the environment's own item, and each
+ * package keeps its own item and its own caller's resolution.
+ *
+ * Each pin was ablated once (the owner-key test removed from the binding, the
+ * pin read red, restored); the readings are in the PR body.
+ */
+describe('ADR-0150 D4 — a package-less action customizes only the holder whose action has its owner key', () => {
+  const item = (packageId: string | null) => (packageId === null
+    ? registry.getEnvironmentScopedItem<{ label?: string }>('action', 'approve')
+    : registry.getPackageScopedItem<{ label?: string }>('action', 'approve', packageId))?.label;
+
+  it('beside one holder on another object, it is the environment\'s own item and the holder keeps its own, in either registration order', () => {
+    for (const authoredFirst of [false, true]) {
+      registry = new SchemaRegistry();
+      registry.logLevel = 'silent';
+      install(A);
+      if (authoredFirst) authored('approve', 'contact');
+      ship('approve', A, 'account');
+      if (!authoredFirst) authored('approve', 'contact');
+      const order = `authored ${authoredFirst ? 'first' : 'last'}`;
+      expect([item(A), item(null)], order).toEqual(['alpha account', 'env contact']);
+      expect(registry.packageScopedHoldersOf('action', 'approve'), order).toEqual([A]);
+    }
+  });
+
+  it('the holder\'s own caller resolves its own action on its object, with its own coordinate', () => {
+    install(A);
+    install(P, [A]);
+    ship('approve', A, 'account');
+    authored('approve', 'contact');
+    for (const caller of [A, P]) {
+      const r = resolve('account', 'approve', caller);
+      expect(r, caller).toMatchObject({ status: 'resolved', holder: { kind: 'package', packageId: A } });
+      expect(label(r), caller).toBe('alpha account');
+    }
+  });
+
+  it('the authored action\'s own object answers the environment\'s item, never a package holder\'s', () => {
+    install(A);
+    install(P, [A]);
+    ship('approve', A, 'account');
+    authored('approve', 'contact');
+    const bare = resolve('contact', 'approve');
+    expect(bare).toMatchObject({ status: 'resolved', via: 'environment', holder: { kind: 'environment' } });
+    expect(label(bare)).toBe('env contact');
+    // D3 (a): a package caller never reaches the environment's item.
+    expect(resolve('contact', 'approve', P)).toMatchObject({
+      status: 'refused', reason: 'outside-closure', candidates: [{ kind: 'environment' }],
+    });
+  });
+
+  it('an object-less authored action beside a holder bound to an object is the environment\'s own item', () => {
+    install(A);
+    ship('approve', A, 'account');
+    authored('approve');
+    expect([item(A), item(null)]).toEqual(['alpha account', 'env global']);
+  });
+
+  it('beside two holders, it customizes the one on its owner key; on a third object it is the environment\'s own', () => {
+    install(A);
+    install(B);
+    ship('approve', A, 'account');
+    ship('approve', B, 'contact');
+    authored('approve', 'lead');
+    expect([item(A), item(B), item(null)], 'on a third object').toEqual(['alpha account', 'beta contact', 'env lead']);
+    authored('approve', 'account');
+    expect([item(A), item(B), item(null)], 'on A\'s object').toEqual(['env account', 'beta contact', undefined]);
+  });
+
+  it('CONTROL — beside the one holder on its own owner key it is still that holder\'s customization (object-bound and object-less)', () => {
+    install(A);
+    ship('approve', A, 'account');
+    authored('approve', 'account');
+    expect([item(A), item(null)], 'bound').toEqual(['env account', undefined]);
+    registry = new SchemaRegistry();
+    registry.logLevel = 'silent';
+    install(A);
+    ship('approve', A);
+    authored('approve');
+    expect([item(A), item(null)], 'object-less').toEqual(['env global', undefined]);
+  });
+
+  it('beside a bound holder and an object-less one, it customizes the holder on its own owner key only', () => {
+    install(A);
+    install(B);
+    ship('approve', A, 'account');
+    ship('approve', B);
+    authored('approve', 'account');
+    expect([item(A), item(B), item(null)], 'bound').toEqual(['env account', 'beta global', undefined]);
+    authored('approve');
+    expect([item(A), item(B), item(null)], 'object-less').toEqual(['alpha account', 'env global', undefined]);
+  });
+
+  it('CONTROL — two holders on its owner key: no package\'s item and no environment item, as before', () => {
+    install(A);
+    install(B);
+    ship('approve', A, 'account');
+    ship('approve', B, 'account');
+    authored('approve', 'account');
+    expect([item(A), item(B), item(null)]).toEqual(['alpha account', 'beta account', undefined]);
+  });
+
+  it('CONTROL — another type keeps the one-holder reading: its package-less row is the holder\'s customization whatever its body', () => {
+    install(A);
+    registry.registerItem('mapping', { name: 'feed', label: 'alpha', objectName: 'account' } as never, 'name' as never, A);
+    registry.registerItem('mapping', { name: 'feed', label: 'env', objectName: 'contact' } as never, 'name' as never);
+    expect(registry.getPackageScopedItem<{ label?: string }>('mapping', 'feed', A)?.label).toBe('env');
+    expect(registry.getEnvironmentScopedItem('mapping', 'feed')).toBeUndefined();
+  });
+});
+
+/**
+ * [ADR-0150 D4] An action is identified by `(owner, owning object, name)`: the
+ * platform's package-less action bound to `lead` and the environment's
+ * object-less action of the same name are two items under two keys. The
+ * registry keeps both, in either registration order, and each owner key reads
+ * its own; one key keeps one item, the later registration.
+ */
+describe('ADR-0150 D4 — the registry keeps one package-less action per owner key', () => {
+  /** Code the host or a plugin registers with no package. */
+  const platform = (name: string, objectName?: string) =>
+    registry.registerItem('action', {
+      name, label: `platform ${objectName ?? 'global'}`, type: 'script',
+      body: { language: 'js', source: 'return 1;', capabilities: [] },
+      ...(objectName ? { objectName } : {}),
+    }, 'name' as never);
+  const fresh = () => {
+    registry = new SchemaRegistry();
+    registry.logLevel = 'silent';
+  };
+  const bothOrders = (first: () => unknown, second: () => unknown): Array<[string, () => void]> => [
+    ['registered in order', () => { first(); second(); }],
+    ['registered in reverse', () => { second(); first(); }],
+  ];
+  const labels = (items: unknown[]) => items.map((i) => (i as { label?: string }).label).sort();
+  const onKey = (objectName: string) => label(resolve(objectName, 'approve'));
+
+  it('the platform\'s action bound to `lead` and the environment\'s object-less one are both kept, each on its own key', () => {
+    for (const [order, register] of bothOrders(() => platform('approve', 'lead'), () => authored('approve'))) {
+      fresh();
+      register();
+      expect(labels(registry.listItems('action')), order).toEqual(['env global', 'platform lead']);
+      expect(labels(registry.getEnvironmentScopedActions('approve')), order).toEqual(['env global', 'platform lead']);
+      expect([onKey('lead'), onKey('contact'), onKey('global')], order).toEqual(['platform lead', 'env global', 'env global']);
+    }
+  });
+
+  it('beside a package holder on another object, each package-less action still reads on its own key', () => {
+    for (const [order, register] of bothOrders(() => platform('approve', 'lead'), () => authored('approve'))) {
+      fresh();
+      install(A);
+      ship('approve', A, 'account');
+      register();
+      expect([onKey('lead'), onKey('account'), onKey('contact')], order).toEqual(['platform lead', 'alpha account', 'env global']);
+    }
+  });
+
+  it('the environment\'s item bound to `lead` registered after the platform\'s on `lead` takes that key', () => {
+    fresh();
+    platform('approve', 'lead');
+    authored('approve', 'lead');
+    expect(labels(registry.listItems('action'))).toEqual(['env lead']);
+    expect(onKey('lead')).toBe('env lead');
+  });
+
+  it('a stored row saved again on another key replaces the name\'s stored row and keeps the platform\'s item', () => {
+    fresh();
+    platform('approve', 'lead');
+    authored('approve', 'contact');
+    authored('approve');
+    expect(labels(registry.listItems('action'))).toEqual(['env global', 'platform lead']);
+  });
+
+  it('the stored row\'s removal retires the stored row, never the platform\'s item, in either registration order', () => {
+    for (const [order, register] of bothOrders(() => platform('approve', 'lead'), () => authored('approve'))) {
+      fresh();
+      register();
+      expect(registry.removeOverlayEntry('action', 'approve'), order).toBe(true);
+      expect(labels(registry.listItems('action')), order).toEqual(['platform lead']);
+      expect(registry.getItem<{ label?: string }>('action', 'approve')?.label, order).toBe('platform lead');
+    }
+  });
+
+  it('CONTROL — one package-less action is one item, and re-registering its key replaces it', () => {
+    fresh();
+    platform('approve', 'lead');
+    platform('approve', 'lead');
+    expect(labels(registry.listItems('action'))).toEqual(['platform lead']);
+    expect([onKey('lead'), onKey('contact')]).toEqual(['platform lead', undefined]);
+    fresh();
+    authored('approve');
+    expect(labels(registry.listItems('action'))).toEqual(['env global']);
+    expect([onKey('lead'), onKey('contact')]).toEqual(['env global', 'env global']);
+    expect(registry.removeOverlayEntry('action', 'approve')).toBe(true);
+    expect(registry.listItems('action')).toEqual([]);
+  });
+});

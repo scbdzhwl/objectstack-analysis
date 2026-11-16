@@ -234,10 +234,10 @@ Fallback to: en (system default) ✓
 
 The "system default" step is the stack's **declared** fallback
 (`i18n.fallbackLocale`, else `defaultLocale`), never a literal `en`. For
-metadata labels one more rule applies (#15711): the inline `label:` authored
-on the metadata **is** the default locale's text, so a request for
-`defaultLocale` stops at the authored label without consulting any other
-locale's bundle — a `zh-CN` workspace with a courtesy `en` bundle serves
+metadata labels one more rule applies (#15711, #33634): the inline `label:`
+authored on the metadata **is** the source locale's text (`sourceLocale`, else
+`defaultLocale`), so a request for that locale stops at the authored label
+without consulting any other locale's bundle — a `zh-CN` workspace with a courtesy `en` bundle serves
 Chinese to `zh-CN` and English to `en`. See
 [Translations](/docs/ui/translations#how-a-locale-is-chosen).
 
@@ -1165,6 +1165,7 @@ beneath an action entry are judged the same way under either.
 | `reports.{name}` | a report's `name`, declared |
 | `hooks.{hook}` | a hook's `name`, declared |
 | `hooks.{hook}.refusals.{code}` | a code that hook's `refusals` declares |
+| `hooks.{hook}.refusals.{code}.reasons.{reason}` | a reason that code declares under `reasons` |
 | `flows.{flow}.screens.{node}` | the `id` of a `type: 'screen'` node in that flow, nodes nested in loop, parallel and try/catch regions included |
 | `flows.{flow}.screens.{node}.fields.{field}` | a `config.fields[].name` on that screen — an object-form screen (`config.objectName`) declares none, and its input labels live under `objects.{objectName}.fields` |
 

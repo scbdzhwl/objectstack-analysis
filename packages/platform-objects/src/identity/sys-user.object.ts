@@ -63,6 +63,16 @@ const SERVICE_ACCOUNT_ADMIN_VISIBLE = [
   ...[MEMBERSHIP_ROLE_OWNER, MEMBERSHIP_ROLE_ADMIN].map((grade) => `'${mapMembershipRole(grade)}' in current_user.positions`),
 ].join(' || ');
 
+/**
+ * Who is offered `add_sso_user` / `import_sso_users`: the platform-admin
+ * standing their doors' gate judges (ADR-0068 D4), on a cloud-managed
+ * environment only, the one place those doors answer. The two halves of the
+ * gate that hides `create_user` and the invitation mirrors there, read the
+ * other way.
+ */
+const MANAGED_ADD_PERSON_VISIBLE =
+  'current_user.isPlatformAdmin == true && has(features.cloudManaged) && features.cloudManaged == true';
+
 const TEMPORARY_PASSWORD_LABEL = 'Temporary password: copy it now, it is shown only once and never stored';
 
 /**
@@ -164,14 +174,26 @@ export const SysUser = ObjectSchema.create({
       },
     },
 
-    // ── Platform admin operations (require better-auth `admin` plugin) ─
+    // ── Platform admin operations ───────────────────────────────────────
     //
-    // These actions hit /api/v1/auth/admin/* endpoints that are only
-    // wired when `auth.plugins.admin` is enabled, so each one is gated on
-    // `requiresFeature: 'admin'` (#2874) — when the plugin is off the UI
-    // hides them instead of rendering buttons that 404. SCIM deployments
-    // keep them: SCIM forces the admin plugin (and `features.admin`) on
-    // (ADR-0134). UI surfaces them under the row menu AND the
+    // `unlock_user`, `create_user` and the actions further down that carry
+    // `requiresFeature: 'admin'` (#2874) are gated on the better-auth `admin`
+    // plugin: when `features.admin` is off the UI hides them instead of
+    // rendering buttons that 404. SCIM deployments keep them: SCIM forces the
+    // admin plugin (and `features.admin`) on (ADR-0134).
+    //
+    // Ban / Unban carry NO `requiresFeature: 'admin'`, deliberately. Their
+    // doors, plugin-auth's `admin/ban-user` / `admin/unban-user`, are
+    // ObjectStack mounts registered whether or not the vendor plugin is on
+    // (`admin-ban-endpoints.ts`): without it the ban is written through the
+    // data engine and the session refusal answers `403 BANNED_USER`
+    // (`user-session-admission.ts`). So `features.admin == true` would hide a
+    // working Deactivate / Reactivate on every kernel that runs without the
+    // plugin, managed environments included. Pinned in
+    // `action-state-visibility.test.ts` (the offer) and plugin-auth's
+    // `pending-sso-users.test.ts` (the declared targets, driven live).
+    //
+    // UI surfaces them under the row menu AND the
     // record-detail header (`record_header`, overflowing into the ⋯
     // "More" menu) so platform admins can manage an account from either
     // the Users list or an open user record — without dropping to SQL or
@@ -212,7 +234,6 @@ export const SysUser = ObjectSchema.create({
       // Platform-admin standing (ADR-0068 D4), then a user not banned yet —
       // see the block header above. A null `banned` reads as not banned.
       visible: 'current_user.isPlatformAdmin == true && has(record.banned) && record.banned != true',
-      requiresFeature: 'admin',
       recordIdParam: 'userId',
       successMessage: 'User banned',
       refreshAfter: true,
@@ -251,7 +272,6 @@ export const SysUser = ObjectSchema.create({
       // Platform-admin standing (ADR-0068 D4), then a banned user — see the
       // block header above.
       visible: 'current_user.isPlatformAdmin == true && has(record.banned) && record.banned == true',
-      requiresFeature: 'admin',
       recordIdParam: 'userId',
       successMessage: 'User unbanned',
       refreshAfter: true,
@@ -418,6 +438,116 @@ export const SysUser = ObjectSchema.create({
         ],
       },
     },
+    // ── Adding people on a cloud-managed environment (cloud#4465 child 1b) ─
+    //
+    // On a cloud-managed environment the password and invitation doors above
+    // answer 409 and their actions are hidden (`features.cloudManaged`). These
+    // two are their managed counterparts: each adds a PENDING person ahead of
+    // their first sign-in (`sys_user.source = 'idp_pending'`, no password),
+    // who then signs in through the hosting organisation's identity provider.
+    // The doors are plugin-auth's `admin/add-sso-user` / `admin/import-sso-users`:
+    // platform-admin gated (ADR-0068), mounted with or without the better-auth
+    // admin plugin (so no `requiresFeature: 'admin'`), and answering
+    // `409 RESOURCE_CONFLICT` off a managed environment. So each is offered
+    // exactly where its door answers: the platform-admin standing AND the
+    // managed flag on. `has()` keeps both hidden while the console holds no
+    // served flag, rather than faulting (see `create_user`'s email params).
+    // No `ai` block: human-only and unassessed (ADR-0011 identity-actions note).
+    {
+      name: 'add_sso_user',
+      label: 'Add User',
+      description:
+        "Add someone by email address before their first sign-in. They sign in through your organization's identity provider; no password is set here.",
+      icon: 'user-plus',
+      variant: 'primary',
+      locations: ['list_toolbar'],
+      type: 'api',
+      target: '/api/v1/auth/admin/add-sso-user',
+      requiredPermissions: [...PLATFORM_ADMIN_USERS_GATE],
+      visible: MANAGED_ADD_PERSON_VISIBLE,
+      // The door's body is a closed key set: email, name, positions,
+      // permissionSets, manager. `positions` / `permissionSets` take a list or
+      // one `;`-separated string, so each picker's single name lands as a list
+      // of one; more are granted on the record afterwards.
+      params: [
+        { field: 'email', required: true },
+        { field: 'name', required: false },
+        {
+          name: 'positions',
+          type: 'text',
+          widget: 'position-ref',
+          label: 'Position',
+          required: false,
+          helpText: 'Optional. The position this person holds from the moment they are added.',
+        },
+        {
+          name: 'permissionSets',
+          type: 'text',
+          widget: 'permission-ref',
+          label: 'Permission Set',
+          required: false,
+          helpText: 'Optional. Grants this permission set to the person, so they can open their apps on first sign-in.',
+        },
+        {
+          name: 'manager',
+          type: 'email',
+          label: 'Manager Email',
+          required: false,
+          helpText: "Optional. The email address of this person's manager, a user of this environment.",
+        },
+      ],
+      refreshAfter: true,
+      resultDialog: {
+        title: 'User Added',
+        acknowledge: 'Done',
+        // Each field is skipped when its path is absent from the answer:
+        // `notApplied` only on a re-add of a person still pending, `managerError`
+        // only when no manager was linked, `host.reason` only when the hosting
+        // organisation was not told.
+        fields: [
+          { path: 'email', label: 'Email', format: 'text' },
+          { path: 'notApplied', label: 'Already pending, so not applied (set these on the record)', format: 'json' },
+          { path: 'managerError', label: 'Manager', format: 'text' },
+          { path: 'host.reason', label: 'Invitation not sent', format: 'text' },
+        ],
+      },
+    },
+    {
+      name: 'import_sso_users',
+      label: 'Import Users',
+      description:
+        "Add many people at once from CSV text. Each row is added on its own, so a bad row fails alone. They sign in through your organization's identity provider; no password is set here.",
+      icon: 'upload',
+      variant: 'secondary',
+      locations: ['list_toolbar'],
+      type: 'api',
+      target: '/api/v1/auth/admin/import-sso-users',
+      requiredPermissions: [...PLATFORM_ADMIN_USERS_GATE],
+      visible: MANAGED_ADD_PERSON_VISIBLE,
+      // The door takes `{ csv }` or `{ rows }`; the dialog sends the text.
+      params: [
+        {
+          name: 'csv',
+          type: 'textarea',
+          label: 'CSV',
+          required: true,
+          helpText:
+            'A header row, then one person per line, at most 500. Columns: email, name, positions and permission_sets '
+            + "(machine names separated by ;) and manager_id (the manager's email address).",
+        },
+      ],
+      refreshAfter: true,
+      resultDialog: {
+        title: 'Import Finished',
+        acknowledge: 'Done',
+        fields: [
+          { path: 'summary.added', label: 'Added', format: 'text' },
+          { path: 'summary.alreadyPending', label: 'Already pending, told again', format: 'text' },
+          { path: 'summary.failed', label: 'Not added', format: 'text' },
+          { path: 'rows', label: 'Result per row', format: 'json' },
+        ],
+      },
+    },
     {
       name: 'set_user_password',
       label: 'Set Password',
@@ -555,23 +685,22 @@ export const SysUser = ObjectSchema.create({
       recordIdParam: 'userId',
       successMessage: 'Manager updated',
       refreshAfter: true,
-      // Hidden for a directory-managed identity, whose manager the IdP owns:
-      // the endpoint's refusal 5 answers 403 / `idp_provisioned`, so the
-      // button would be an affordance the server side refuses by design.
-      // This carries the SAME `record.source` term the three self-service
-      // identity actions below carry — and only that term: this is an admin
-      // action on someone else's row, so their `record.id == ctx.user.id`
-      // half is deliberately NOT copied (it would hide the button from every
-      // admin). `has()` per operand for the sparse action face (#8990) — the
-      // rationale is on the self-service block below.
+      // Offered on every row, `idp_provisioned` ones included, and the
+      // endpoint refuses the one case it must. Its refusal 5 answers 403 /
+      // `idp_provisioned` only for an identity a SCIM directory HOLDS (a
+      // `sys_scim_subject` row, maintainer ruling record 6895645364, option
+      // A); a person who only signs in through SSO carries the same `source`
+      // with no directory behind them, and their manager is set here. No
+      // column on this row says "held by SCIM", so ⛔ a `record.source` term
+      // would hide the button from every SSO-only person — the defect this
+      // predicate used to carry — and a SCIM-held row is answered by the
+      // server's refusal, which names the directory to go to.
       //
-      // ANDed ahead of it, the platform-admin standing the door's gate judges
-      // (ADR-0068 D4, the admin block header above): without it the button
-      // was offered to every caller who could open a user row, and the door
-      // refused each one 403 `PERMISSION_DENIED`. One flat conjunction, the
-      // principal term first, the way the self-service predicates below lead
-      // with theirs.
-      visible: 'current_user.isPlatformAdmin == true && has(record.source) && record.source != "idp_provisioned"',
+      // The platform-admin standing the door's gate judges (ADR-0068 D4, the
+      // admin block header above): without it the button was offered to every
+      // caller who could open a user row, and the door refused each one 403
+      // `PERMISSION_DENIED`.
+      visible: 'current_user.isPlatformAdmin == true',
       // The action collects a param, so its explanatory line rides
       // `description` and ⛔ never `confirmText` — pairing the two shows two
       // dialogs for one decision (#7278/#7309).
@@ -1397,8 +1526,13 @@ export const SysUser = ObjectSchema.create({
       options: [
         { label: 'IdP-Provisioned', value: 'idp_provisioned' },
         { label: 'Local Account', value: 'env_native' },
+        // [#33181] A person added on a managed environment who has not signed
+        // in yet: no password, no session, until their first sign-in through
+        // the hosting organisation's identity provider moves the row to
+        // `idp_provisioned` (`plugin-auth` `pending-sso-marker.ts`).
+        { label: 'Pending SSO Sign-In', value: 'idp_pending' },
       ],
-      description: 'How this identity was created — idp_provisioned (federated SSO JIT or SCIM directory provisioning) or env_native (local signup, a local password, or an app end-user). System-managed; do not edit.',
+      description: 'How this identity was created — idp_provisioned (federated SSO JIT or SCIM directory provisioning), env_native (local signup, a local password, or an app end-user), or idp_pending (added on a managed environment and waiting for the first sign-in through the hosting organisation identity provider). System-managed; do not edit.',
     }),
 
     id: Field.text({

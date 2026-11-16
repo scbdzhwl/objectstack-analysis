@@ -127,6 +127,7 @@ const es = {
     // `pnpm check:eager-closure` prints it.
     rowCeilingNote: "Mostrando los primeros {{shown}} de {{total}} registros. Acota el filtro.",
     rowCeilingNoteUnknownTotal: "Mostrando los primeros {{shown}} registros. Acota el filtro.",
+    ungroupedSection: "Otros",
   },
   actions: {
     decisionOutput: {
@@ -2768,6 +2769,10 @@ const es = {
     },
     login: {
       signingIn: "Iniciando sesión…",
+      directSignIn: {
+        description: "Inicia sesión con el inicio de sesión único de tu organización.",
+        retry: "Continuar con el inicio de sesión único",
+      },
       ssoHandoff: "Continuar a {{target}}",
       devAdminHint: {
         title: "Instancia de desarrollo local",
@@ -2789,8 +2794,21 @@ const es = {
         ssoAccountNotInvited: "Tu cuenta aún no está configurada en este sistema. Pide a tu administrador que te invite.",
         ssoAccountNotLinked: "Ya existe aquí una cuenta con tu correo, pero no está conectada al inicio de sesión único. Inicia sesión de otra forma o pide a tu administrador que la conecte.",
         ssoResponseRejected: "El servicio de inicio de sesión de tu organización envió una respuesta que este sistema no pudo aceptar. Pide a tu administrador que revise la configuración del inicio de sesión único.",
+        ssoEmailDomainNotAllowed: "No se creó ninguna cuenta: tu dirección de correo no pertenece a un dominio del que este sistema acepte cuentas nuevas. Usa el correo de tu organización o consulta a tu administrador.",
+        ssoEmailNotAnAddress: "No se creó ninguna cuenta: el servicio de inicio de sesión de tu organización no envió una dirección de correo utilizable para ti. Pide a tu administrador que revise la configuración del inicio de sesión único.",
         ssoStartFromLoginPage: "El inicio de sesión debe empezar en la página de acceso de este sistema. Introduce aquí tu correo de trabajo y elige «Iniciar sesión con SSO».",
         ssoTechnicalDetails: "Detalles técnicos",
+        directSignInIncomplete: "No se completó el inicio de sesión: volviste del inicio de sesión único sin haber iniciado sesión. Comprueba que este navegador permite cookies para este sitio y vuelve a intentarlo.",
+        directSignInUnavailable: "No se pudo iniciar el inicio de sesión único para este sistema. Pide a tu administrador que revise qué servicio de inicio de sesión usa.",
+        directSignInRateLimited: "Se iniciaron demasiados inicios de sesión desde esta red hace un momento. Espera unos segundos y vuelve a intentarlo.",
+        networkNotAllowed: "Este sistema no permite iniciar sesión desde tu red. Conéctate desde una red permitida (por ejemplo, la red de la oficina o la VPN de tu organización) o pide ayuda a tu administrador.",
+        ssoAccessDenied: "La cuenta con la que iniciaste sesión no tiene acceso a este entorno. Inicia sesión con una cuenta que tenga acceso o pide a un administrador de la organización de este entorno que te añada como miembro.",
+        ssoSwitchAccount: "Cambiar de cuenta",
+        ssoBackToConsole: "Volver a la consola",
+        ssoSwitchAccountHint: "Cambiar de cuenta abre tu servicio de inicio de sesión en una pestaña nueva y cierra allí tu sesión. Después, vuelve a iniciar sesión aquí con una cuenta que tenga acceso.",
+        linkEmailMismatch: "La cuenta no se vinculó: su dirección de correo electrónico no coincide con la de la cuenta con la que iniciaste sesión. Vincula una cuenta que use la misma dirección de correo electrónico.",
+        linkAlreadyLinkedToOtherUser: "La cuenta no se vinculó: ya está vinculada a otro usuario de este sistema. Vincula otra cuenta, o inicia sesión como el usuario al que está vinculada y desvincúlala allí primero.",
+        linkUnableToLink: "No se pudo vincular la cuenta. Comprueba que su dirección de correo electrónico esté verificada en ese servicio de inicio de sesión y vuelve a intentarlo. Si sigue fallando, contacta con tu administrador.",
         twoFactorInvalidCode: "Ese código no es válido. Revise su aplicación de autenticación e inténtelo de nuevo.",
         twoFactorInvalidBackupCode: "Ese código de respaldo no es válido o ya se ha utilizado.",
         twoFactorTooManyAttempts: "Demasiados códigos incorrectos. Vuelva a iniciar sesión con su contraseña.",
@@ -3187,6 +3205,9 @@ const es = {
     allDocs: 'Toda la documentación',
     onlineDocs: 'Documentación en línea',
     loadingDocumentation: 'Cargando documentación',
+    docConflictTitle: 'Elija un paquete',
+    docConflictDescription: 'Más de un paquete instalado proporciona un documento llamado {{name}}. Abra el que quiera leer.',
+    docConflictCandidates: 'Paquetes que proporcionan este documento',
     documentation: 'Documentación',
     uncategorized: 'Sin categoría',
     about: 'Acerca de',
@@ -3645,12 +3666,13 @@ const es = {
       notAllowedToInvite: 'No tiene permiso para invitar usuarios a esta organización.',
       notAllowedToInviteWithRole: 'No tiene permiso para invitar a un usuario con este rol.',
       alreadyInvited: 'Este usuario ya ha sido invitado a esta organización.',
+      alreadyMember: 'Este usuario ya es miembro de esta organización.',
       organizationExists: 'Esa organización ya existe.',
       slugTaken: 'Ese slug ya está en uso.',
       notAllowedToCreate: 'No tiene permiso para crear una organización nueva.',
       organizationLimitReached: 'Ha alcanzado el número máximo de organizaciones que puede crear. Las organizaciones a las que se le ha invitado no cuentan para este límite.',
       notTheRecipient: 'No es el destinatario de esta invitación.',
-      invitationNotFound: 'Esta invitación ya no existe o ha caducado.',
+      invitationNotFound: 'Esta invitación ya se utilizó, caducó o fue revocada. Si ya la aceptó, encontrará la organización en su lista de organizaciones.',
       unknown: 'Algo salió mal. Inténtelo de nuevo.',
     },
     backToList: "Volver a las organizaciones",
@@ -4042,9 +4064,22 @@ const es = {
   // pin advances, `chatbotToolLabels-locale-parity-7481` starts checking them
   // against the registry instead of against its own hand-held list.
   chatbot: {
+    modelPicker: {
+      allowanceNote: 'Te queda un {{left}} de tu cuota de IA. Un modelo marcado con ×N la consume N veces más rápido que el modelo predeterminado.',
+      confirmTitle: '¿Cambiar a {{model}}?',
+      confirmBody: 'Cada mensaje con este modelo consume {{multiplier}} veces más cuota de IA que uno con el modelo predeterminado.',
+      confirmAllowance: 'Te queda un {{left}}, y con este modelo se agota {{multiplier}} veces más rápido.',
+      confirmCancel: 'Cancelar',
+      confirmAction: 'Cambiar de modelo',
+    },
     // objectui#13461 — the composer's send button and the scroll-to-latest button.
     sendMessage: 'Enviar mensaje',
     scrollToBottom: 'Ir al último mensaje',
+    // objectstack#32984 — a message typed while a reply is running waits above the composer.
+    composer: {
+      queued: "Se enviará cuando termine la respuesta actual",
+      queuedCancel: "Cancelar",
+    },
     answer: {
       showFull: 'Mostrar respuesta completa',
       collapse: 'Contraer',
@@ -4060,11 +4095,16 @@ const es = {
       aggregations: 'Agregaciones',
       records: 'Registros',
       visibleToYou: 'Solo los registros que puede ver',
+      dataset: 'Conjunto de datos',
+      metrics: 'Métricas',
+      noAddedFilter: 'Sin filtro añadido a la definición del conjunto de datos',
     },
     tool: {
       aggregate_data: "Resumir los datos",
       get_record: "Leer el registro",
+      list_datasets: "Ver las métricas disponibles",
       query_data: "Consultar los datos necesarios",
+      query_dataset: "Consultar por métrica",
       query_records: "Buscar los registros",
       read_package_doc: "Leer la guía de la aplicación",
       search_knowledge: "Consultar la base de conocimiento",
@@ -4142,6 +4182,9 @@ const es = {
       countSeedData: "datos de ejemplo",
       extendTarget: "Se añade a la app existente: {{app}}",
       awaitingConfirm: "Pendiente de confirmación",
+      // objectstack#32984 — the plan card's build states.
+      confirmed: "Confirmado",
+      buildFailed: "No construido: no se creó nada",
       iterateOrNew: {
         question: "Esto se solapa con «{{app}}», una app que ya tiene. ¿Seguir mejorándola o crear una app independiente?",
         questionUnnamed: "Esto se solapa con una app que ya tiene. ¿Seguir mejorando esa app o crear una independiente?",
@@ -4152,6 +4195,7 @@ const es = {
       objectsAndFields: "Objetos y campos",
       views: "Vistas",
       suggestedField: "sugerido",
+      suggestedFieldLegend: "Los campos marcados como «{{mark}}» los añadió la IA; usted no los pidió.",
       nameField: "Nombre: {{field}}",
     },
     build: {
@@ -4174,6 +4218,16 @@ const es = {
       verifying: "Comprobando el cambio…",
       verifyStep: "paso {{n}}",
       verified: "Cambio comprobado",
+      // objectstack#32984 — the build card's issues line, in the customer's words.
+      issuesCount: "{{count}} por corregir",
+      issuesSummary: "Algunas partes de esta construcción deben corregirse antes de poder usarse. Responde «corrige los problemas» y el asistente las reparará.",
+      warningsSummary: "La aplicación está construida, con algunos puntos que conviene revisar. Pregunta al asistente cuáles son si quieres mejorarla.",
+      issuesDetails: "Detalles técnicos",
+      // objectstack#32984 — the published draft badge's failed-item count, which was English in every locale.
+      needsAttention: "{{count}} requieren atención",
+      needsAttention_one: "{{count}} requiere atención",
+      needsAttention_many: "{{count}} de elementos requieren atención",
+      needsAttention_other: "{{count}} requieren atención",
       unknownPhase: "Fase de creación desconocida",
       nextStepsLead: "A continuación puede decir: {{steps}}",
       nextStepQuote: "«{{step}}»",
@@ -4529,6 +4583,11 @@ const es = {
     daysAgo_other: 'hace {{count}} días',
   },
   preview: {
+    // objectstack#32984 — the list of an object the draft preview shows before its first publish.
+    unpublishedList: {
+      title: "Los registros aparecerán aquí al publicar",
+      message: "Estás previsualizando un objeto que aún no se ha publicado, por lo que no tiene registros. Publícalo para empezar a añadir registros o cargar sus datos de ejemplo.",
+    },
     empty: {
       loadFailedTitle: 'No se pudo cargar la vista previa del borrador',
       loadFailedDescription: 'No se pudo leer la capa de borrador. Reintenta o comprueba tu conexión.',
@@ -4898,6 +4957,7 @@ const es = {
     disableAppNamed: "Deshabilitar {{name}}",
     setDefault: "Establecer como predeterminada",
     setDefaultNamed: "Establecer {{name}} como predeterminada",
+    alreadyDefault: "Ya es la aplicación predeterminada",
     deleteApp: "Eliminar aplicación",
     deleteAppNamed: "Eliminar {{name}}",
     confirmDelete: "Haga clic de nuevo para confirmar la eliminación",

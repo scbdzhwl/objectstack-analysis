@@ -184,6 +184,39 @@ function nonUserRecipientTypeRemedy(value: unknown): string {
 }
 
 /**
+ * [ADR-0111 D7] A share a non-system caller grants is always a MANUAL share.
+ * Only the platform's own paths — the sharing-rule evaluator, team and system
+ * machinery, each running under a system context — write a share with another
+ * `source` or with a `sourceId`.
+ *
+ * So the non-system path refuses, rather than rewrites, an input whose
+ * `source` is present and is not `'manual'`, and an input that carries any
+ * `sourceId`: a caller that sent a source learns it was not honoured. An
+ * absent `source` (`undefined` or `null`, which `grant` reads as `'manual'`)
+ * and an explicit `'manual'` with no `sourceId` pass unchanged.
+ *
+ * Called before any read or write, so a refused caller pays nothing.
+ */
+function assertDirectGrantIsManual(input: GrantShareInput): void {
+  const source: unknown = input.source;
+  if (source != null && source !== 'manual') {
+    throw new Error(
+      `VALIDATION_FAILED: a share granted directly is a manual share — send no source, or source 'manual' `
+        + `(received ${JSON.stringify(source)}); a share with any other source is written only by the `
+        + `platform's own sharing-rule, team and system paths (ADR-0111 D7)`,
+    );
+  }
+  const sourceId: unknown = input.sourceId;
+  if (sourceId != null) {
+    throw new Error(
+      `VALIDATION_FAILED: a share granted directly is a manual share and carries no sourceId `
+        + `(received ${JSON.stringify(sourceId)}); a share with a sourceId is written only by the `
+        + `platform's own sharing-rule, team and system paths (ADR-0111 D7)`,
+    );
+  }
+}
+
+/**
  * Owner field convention. Hard-coded to `owner_id` for MVP — the
  * sharing model in Salesforce / ServiceNow / Dynamics all assume a
  * single owner field, and customising it is a follow-up. Objects
@@ -1906,9 +1939,11 @@ export class SharingService implements ISharingService {
    * [ADR-0111 D1/D7] Non-system callers must hold {@link canManageShares} on
    * the record; the recipient must be a `user` (the only type any gate
    * enforces); and the object must be in an enforcing sharing posture. The
-   * upsert matches on `(object, record, recipient, source)` so a manual grant
-   * never clobbers a rule-materialised row (and vice versa) — when both exist,
-   * the gates' `$in` queries make the widest level win (grants are additive).
+   * upsert matches on `(object, record, recipient, source)`, plus `source_id`
+   * for a materialised grant, so a manual grant never clobbers a
+   * rule-materialised row (and vice versa) and one rule never clobbers
+   * another's — when several exist, the gates' `$in` queries make the widest
+   * level win (grants are additive).
    */
   async grant(
     input: GrantShareInput,
@@ -1990,6 +2025,9 @@ export class SharingService implements ISharingService {
       this.assertNotInertGrant(input.object);
       organizationId = await this.resolveSystemGrantOrganization(input, context);
     } else {
+      // [ADR-0111 D7] A direct grant is a manual share — refused here, ahead
+      // of every read, so a refused caller pays nothing.
+      assertDirectGrantIsManual(input);
       this.assertSharingEnforced(input.object);
       await this.assertCanManageShares(input.object, input.recordId, context);
       organizationId = await this.resolveDirectGrantOrganization(input, context);
@@ -2004,6 +2042,22 @@ export class SharingService implements ISharingService {
     // is part of the key (ADR-0111 D7): a manual grant must not clobber a
     // rule-materialised row — the rule's next reconcile would fight it (flip
     // it back or purge it), leaving access flapping between the two answers.
+    //
+    // A materialised grant's `source_id` is part of the key too: one row per
+    // (rule, recipient). Two rules reaching one user on one record are two
+    // grants, and the gates' `$in` reads already take the widest level across
+    // rows, so the effective access is the highest any rule grants. Keyed
+    // without it, the second rule found the first rule's row and overwrote its
+    // level and `source_id`: the last rule written won whatever its level
+    // (edit then read left read), and because every rule reconciles and
+    // revokes by its own `source_id`, the merged row belonged to whichever
+    // rule wrote last — revoking that rule took away access the other rule
+    // still grants, and the other rule's revoke found nothing to remove.
+    // Only the rule evaluator's SYSTEM path supplies a `source_id` that names a
+    // rule. A manual grant, and any grant made outside the rule evaluator, keeps
+    // the four-part key, so a repeated grant of that kind still upserts its one
+    // row.
+    const sourceId = context?.isSystem && source !== 'manual' && input.sourceId ? input.sourceId : undefined;
     const existing = await this.engine.find('sys_record_share', {
       where: {
         object_name: input.object,
@@ -2011,6 +2065,7 @@ export class SharingService implements ISharingService {
         recipient_type: recipientType,
         recipient_id: input.recipientId,
         source,
+        ...(sourceId !== undefined ? { source_id: sourceId } : {}),
       },
       limit: 1,
       context: SYSTEM_CTX,

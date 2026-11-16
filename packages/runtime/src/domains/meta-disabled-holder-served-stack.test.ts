@@ -20,6 +20,8 @@ import { MetadataPlugin } from '@objectstack/metadata';
 import { ObjectQL, ObjectQLPlugin } from '@objectstack/objectql';
 import { SqlDriver } from '@objectstack/driver-sql';
 import { resolveThrownHttpError } from '@objectstack/types';
+import type { EngineQueryOptions } from '@objectstack/spec/data';
+import { RestServer } from '@objectstack/rest';
 import { HttpDispatcher } from '../http-dispatcher.js';
 
 const CALLER = { userId: 'u_served_stack', tenantId: 'org_qa', isSystem: true, positions: [], permissions: [], systemPermissions: ['manage_metadata'] };
@@ -285,10 +287,11 @@ describe.each([
             expect([read.status, codeOf(read.body)], JSON.stringify(read.body)).toEqual([409, 'RESOURCE_CONFLICT']);
             expect([...(read.body?.error?.details?.candidates ?? [])].map((c: any) => c.packageId).sort(), JSON.stringify(read.body))
                 .toEqual([ROW_E, ROW_F].sort());
-            // The layered door answers a package-scoped refusal by its sentence alone, as for two registry holders (#32622).
+            // [#32622, ADR-0150 D5] The layered door names the same served holders as `details.candidates`.
             const layers = await get(booted.kernel, '/meta/dashboard/three_rows_dash/layers');
             expect([layers.status, codeOf(layers.body)], JSON.stringify(layers.body)).toEqual([409, 'RESOURCE_CONFLICT']);
-            for (const id of [ROW_E, ROW_F]) expect(JSON.stringify(layers.body)).toContain(id);
+            expect([...(layers.body?.error?.details?.candidates ?? [])].map((c: any) => c.packageId).sort(), JSON.stringify(layers.body))
+                .toEqual([ROW_E, ROW_F].sort());
             // [contract review S3] Bare /published asks the plain read first and answers its refusal.
             const published = await get(booted.kernel, '/meta/dashboard/three_rows_dash/published');
             expect([published.status, codeOf(published.body)], JSON.stringify(published.body)).toEqual([409, 'RESOURCE_CONFLICT']);
@@ -526,12 +529,13 @@ describe('[#32607 M1, M2] the no-disabled arm judges holders at the rows\' grain
                 await down(booted);
             }
         }
-        // Each save order answers the same before and after a reboot. Which
-        // row it serves still follows the save order (the row saved first),
-        // exactly as on `main` 89d7bef033: that is the plain read's own pick
-        // between a base's row and its pair's undeclared row, not this
-        // judgment's, and it is carried separately.
+        // Each save order answers the same before and after a reboot.
+        // [#32662 scope note (b)] …and the same row in both save orders: the
+        // base's own row, on the plain read, `/published` and the execution
+        // face. FROM (`main` d4fbb4dbb6): the plain read served the row saved
+        // first, so with the pair's saved first it served the pair's row.
         expect([answers[0] === answers[1], answers[2] === answers[3]], answers.join(' | ')).toEqual([true, true]);
+        expect(answers, answers.join(' | ')).toEqual(Array(4).fill(JSON.stringify(['base row', 'base row', 'base row'])));
     }, 240_000);
 
     // M2 (n1: a bundled type at a member other than the canonical one): base A stores `en-US`, dependent D stores `fr-FR`.
@@ -572,4 +576,403 @@ describe('[#32607 M1, M2] the no-disabled arm judges holders at the rows\' grain
             await down(booted);
         }
     }, 240_000);
+});
+
+// ---------------------------------------------------------------------------
+// [#33127, #32662, ADR-0150 D3/D4] Each exact address serves its own stored
+// row, in every save order, before and after a reboot. The registry kept ONE
+// bare slot per name for a stored row bound to a package, so the row hydrated
+// last took it. Measured on `main` d4fbb4dbb6 through these doors:
+// - #33127, both packages ship a `tool` and each stores its own row: after a
+//   reboot `?package=` answered its own row only for the holder whose row
+//   hydrated last; the other answered its shipped item.
+// - #32662, two packages hold a name only as stored rows: `?package=<id>.custom`
+//   (each one's customization pair address) answered 404 for both before a
+//   reboot; after it, 200 for the row hydrated last and 409 naming one side
+//   for the other.
+// - #32662 scope note (b), a package's row beside its own pair's undeclared
+//   row: the plain read served the pair's row when it was saved first, while
+//   `/published` served the package's own row.
+// Throughout, the read naming no package of a two-holder name refuses 409
+// naming both (#32607): unchanged.
+// ---------------------------------------------------------------------------
+describe('[#33127, #32662] each exact address serves its own stored row, before and after a reboot', () => {
+    const roots: string[] = [];
+    afterAll(() => { for (const dir of roots) rmSync(dir, { recursive: true, force: true }); });
+    const freshFile = () => {
+        const dir = mkdtempSync(join(tmpdir(), 'os-meta-own-slot-db-'));
+        roots.push(dir);
+        return join(dir, 'meta.sqlite');
+    };
+    const down = async (booted: Booted) => {
+        if (booted.kernel.getState() === 'running') await booted.kernel.shutdown();
+        roots.push(booted.root);
+    };
+    const short = (id: string) => id.split('.').pop()!;
+    const P = 'com.qa.ownslotalpha';
+    const Q = 'com.qa.ownslotbeta';
+    const bodyOf = (type: string, label: string): Record<string, unknown> =>
+        type === 'tool' ? { label, description: label, parameters: { type: 'object', properties: {} } } : { label, widgets: [] };
+    const manifestOf = (id: string, ships: readonly string[] = []) => ({
+        id, name: short(id), namespace: short(id), version: '1.0.0', type: 'app', objects: [],
+        ...(ships.includes('tool') ? { tools: [{ name: 'shared_tool', ...bodyOf('tool', `shipped-${short(id)}`) }] } : {}),
+    });
+    /** `200 <label>`, or `<status> <code> [<candidates>]`. */
+    async function answer(kernel: ObjectKernel, type: string, name: string, query: Record<string, string> = {}, door = '') {
+        const r = await get(kernel, `/meta/${type}/${name}${door}`, query);
+        const body = unwrap(r.body);
+        if (r.status === 200) return `200 ${body?.item?.label ?? body?.label}`;
+        const candidates = r.body?.error?.details?.candidates?.map((c: any) => short(String(c.packageId ?? c.kind)));
+        return `${r.status} ${codeOf(r.body)}${candidates ? ` [${candidates.join(',')}]` : ''}`;
+    }
+    /** Boot `manifests` over a fresh file, lay `rows`, observe; reboot over the same file, observe again. */
+    async function bothLegs(manifests: readonly Record<string, unknown>[], lay: (engine: ObjectQL) => Promise<void>, observe: (kernel: ObjectKernel) => Promise<unknown>) {
+        const file = freshFile();
+        let booted = await bootManifests(manifests, file);
+        let before: unknown;
+        try {
+            await lay(booted.engine);
+            before = await observe(booted.kernel);
+        } finally {
+            await down(booted);
+        }
+        booted = await bootManifests(manifests, file);
+        try {
+            return { before, after: await observe(booted.kernel) };
+        } finally {
+            await down(booted);
+        }
+    }
+
+    for (const rowOrder of [[P, Q], [Q, P]] as const) {
+        it(`#33127 tool, both packages ship it, ${short(rowOrder[0])}'s row stored first: after a reboot each \`?package=\` serves its own row, and the bare read refuses naming both`, async () => {
+            const { after } = await bothLegs([manifestOf(P, ['tool']), manifestOf(Q, ['tool'])],
+                async (engine) => { for (const id of rowOrder) await layRow(engine, 'tool', 'shared_tool', id, bodyOf('tool', `row-${short(id)}`)); },
+                async (kernel) => [
+                    await answer(kernel, 'tool', 'shared_tool', { package: P }),
+                    await answer(kernel, 'tool', 'shared_tool', { package: Q }),
+                    await answer(kernel, 'tool', 'shared_tool'),
+                ]);
+            // FROM (main): the holder whose row hydrated first answered `shipped-<it>`.
+            expect(after).toEqual(['200 row-ownslotalpha', '200 row-ownslotbeta', `409 RESOURCE_CONFLICT [${short(P)},${short(Q)}]`]);
+        }, 120_000);
+    }
+
+    it('CONTROL — #33127 tool, one package ships it and stores its row: `?package=` and the bare read serve the row after a reboot, as before', async () => {
+        const { after } = await bothLegs([manifestOf(P, ['tool']), manifestOf(Q)],
+            async (engine) => { await layRow(engine, 'tool', 'shared_tool', P, bodyOf('tool', 'row-ownslotalpha')); },
+            async (kernel) => [await answer(kernel, 'tool', 'shared_tool', { package: P }), await answer(kernel, 'tool', 'shared_tool')]);
+        expect(after).toEqual(['200 row-ownslotalpha', '200 row-ownslotalpha']);
+    }, 120_000);
+
+    for (const type of ['dashboard', 'tool']) {
+        for (const saved of [[P, Q], [Q, P]] as const) {
+            it(`#32662 ${type}, two packages hold the name only as stored rows, ${short(saved[0])} saved first: each pair address serves its base's row before and after a reboot; the bare read refuses naming both`, async () => {
+                const legs = await bothLegs([manifestOf(P), manifestOf(Q)],
+                    async (engine) => { for (const id of saved) await layRow(engine, type, 'pair_addr', id, bodyOf(type, `row-${short(id)}`)); },
+                    async (kernel) => [
+                        await answer(kernel, type, 'pair_addr', { package: `${P}.custom` }),
+                        await answer(kernel, type, 'pair_addr', { package: `${Q}.custom` }),
+                        await answer(kernel, type, 'pair_addr', { package: P }),
+                        await answer(kernel, type, 'pair_addr', { package: Q }),
+                        await answer(kernel, type, 'pair_addr'),
+                    ]);
+                // FROM (main): before a reboot both pair addresses 404; after
+                // it, 200 for the row hydrated last and 409 for the other.
+                const own = ['200 row-ownslotalpha', '200 row-ownslotbeta', '200 row-ownslotalpha', '200 row-ownslotbeta', `409 RESOURCE_CONFLICT [${short(P)},${short(Q)}]`];
+                expect(legs).toEqual({ before: own, after: own });
+            }, 120_000);
+        }
+
+        for (const saved of [[P, `${P}.custom`], [`${P}.custom`, P]] as const) {
+            it(`#32662 (b) ${type}, a package's row and its pair's undeclared row, ${saved[0] === P ? 'the package' : 'the pair'} saved first: the plain read and /published serve the package's own row, before and after a reboot`, async () => {
+                const legs = await bothLegs([manifestOf(P), manifestOf(Q)],
+                    async (engine) => { for (const id of saved) await layRow(engine, type, 'own_pair', id, bodyOf(type, id === P ? 'row-own' : 'row-pair')); },
+                    async (kernel) => [
+                        await answer(kernel, type, 'own_pair'),
+                        await answer(kernel, type, 'own_pair', {}, '/published'),
+                        await answer(kernel, type, 'own_pair', { package: P }),
+                    ]);
+                // FROM (main): with the pair saved first, the plain read served `row-pair`.
+                expect(legs).toEqual({ before: ['200 row-own', '200 row-own', '200 row-own'], after: ['200 row-own', '200 row-own', '200 row-own'] });
+            }, 120_000);
+        }
+    }
+});
+
+// ---------------------------------------------------------------------------
+// [#32605, epic ruling 6781691009, ADR-0150 D3/D4/D5] The bare SAVE of a name
+// an enabled package E and a disabled package D both hold writes where the
+// bare read serves it: E's row. It never writes a package-unbound row, never
+// edits D's row (byte-unchanged), and a row of each is E's update, not a 409.
+// Once D is enabled again, the bare read and the bare save both answer 409
+// naming both. Both transports (the runtime dispatcher and `RestServer`), both
+// registration orders; the holders ship the name in code, hold it only as
+// stored rows of authored packages, or one of each.
+//
+// Measured on main 1e65a389 (step 0 of #32605): over no stored row the save
+// wrote a package-unbound row; over D's row alone it updated D's row while the
+// read kept serving E's code item; over a row of each it refused 409 naming D.
+// ---------------------------------------------------------------------------
+
+describe('[#32605] the bare save of a name an enabled and a disabled package hold writes the served holder\'s row', () => {
+    const CODE_E = 'com.qa.save_alpha';
+    const CODE_D = 'com.qa.save_beta';
+    const AUTH_E = 'com.qa.save_authored_alpha';
+    const AUTH_D = 'com.qa.save_authored_beta';
+    const AUTH_F = 'com.qa.save_authored_gamma';
+    const BOTH_SHIP = ['ship_none_dash', 'ship_drow_dash', 'ship_de_dash', 'ship_ed_dash'];
+    const E_SHIPS = ['e_only_dash', 'e_authored_drow_dash', 'e_unbound_drow_dash', 'e_two_authored_dash'];
+    const savePackageOf = (id: string) => ({
+        id, name: id.split('.').pop(), namespace: id.split('.').pop(), version: '1.0.0', type: 'app', objects: [],
+        dashboards: [...BOTH_SHIP, ...(id === CODE_E ? E_SHIPS : [])].map((name) => ({ name, label: `${id} code`, widgets: [] })),
+    });
+
+    interface SaveBooted extends Booted { put(name: string, label: string): Promise<{ status: number | undefined; body: any }> }
+
+    async function bootSaveKernel(order: readonly string[], transport: 'dispatcher' | 'rest'): Promise<SaveBooted> {
+        const kernel = new ObjectKernel({ logger: { level: 'silent' }, gracefulShutdown: false });
+        const root = mkdtempSync(join(tmpdir(), 'os-meta-bare-save-'));
+        const engine = new ObjectQL();
+        engine.registerDriver(new SqlDriver({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true }) as any, true);
+        await kernel.use(new MetadataPlugin({ watch: false, rootDir: root }));
+        await kernel.use(new ObjectQLPlugin({ ql: engine }));
+        const host: Plugin = {
+            name: 'qa.bare-save-host',
+            dependencies: ['com.objectstack.engine.objectql'],
+            init: async (ctx: PluginContext) => {
+                for (const id of order) await ctx.getService<ManifestDoor>('manifest').register(savePackageOf(id));
+            },
+        };
+        await kernel.use(host);
+        await kernel.bootstrap();
+        await engine.syncSchemas();
+        // Authored (writable) packages that ship nothing: holders by stored rows alone.
+        for (const id of order[0] === CODE_D ? [AUTH_D, AUTH_E, AUTH_F] : [AUTH_E, AUTH_F, AUTH_D]) {
+            engine.registry.installPackage({ id, name: id, version: '1.0.0', type: 'app' } as any, 'authored');
+        }
+        const body = (name: string, label: string) => ({ name, label, widgets: [] });
+        if (transport === 'dispatcher') {
+            return {
+                kernel, engine, root,
+                put: async (name, label) => {
+                    const dispatcher = new HttpDispatcher(kernel as any, undefined, { enforceProjectMembership: false });
+                    (dispatcher as any).timedResolveExecutionContext = async () => ({ ...CALLER });
+                    const request = new Request(`http://localhost/api/v1/meta/dashboard/${name}`, {
+                        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body(name, label)),
+                    });
+                    try {
+                        const out: any = await dispatcher.dispatch('PUT', `/meta/dashboard/${name}`, body(name, label), {}, { request } as any, '/api/v1');
+                        return { status: out.response?.status as number | undefined, body: out.response?.body };
+                    } catch (e) {
+                        const thrown = resolveThrownHttpError(e);
+                        return { status: thrown.status, body: { error: { code: thrown.code, message: String((e as Error)?.message ?? '') } } };
+                    }
+                },
+            };
+        }
+        const noop = () => {};
+        const server = { get: noop, post: noop, put: noop, delete: noop, patch: noop, use: noop, listen: async () => {}, close: async () => {} };
+        const rest: any = new RestServer(server as any, kernel.getService('protocol') as any, { api: { requireAuth: false } } as any);
+        rest.registerRoutes();
+        const route = rest.getRoutes().find((r: any) => r.method === 'PUT' && r.path === '/api/v1/meta/:type/:name');
+        if (!route) throw new Error('PUT /api/v1/meta/:type/:name is not registered');
+        rest.resolveExecCtx = async () => ({ ...CALLER });
+        return {
+            kernel, engine, root,
+            put: async (name, label) => {
+                const res: any = { statusCode: 200, body: undefined, headers: {} as Record<string, string> };
+                res.status = (code: number) => { res.statusCode = code; return res; };
+                res.json = (payload: any) => { res.body = payload; return res; };
+                res.send = () => res;
+                res.end = () => res;
+                res.header = (k: string, v: string) => { res.headers[k] = v; return res; };
+                res.setHeader = () => {};
+                res.write = () => true;
+                await route.handler({
+                    method: 'PUT', path: `/api/v1/meta/dashboard/${name}`, params: { type: 'dashboard', name },
+                    headers: {}, query: {}, body: body(name, label),
+                }, res);
+                return { status: res.statusCode, body: res.body };
+            },
+        };
+    }
+
+    /** Every stored row of the name, keyed by binding (`null`: package-unbound), with its stored bytes. */
+    const storedRows = async (engine: ObjectQL, name: string): Promise<Record<string, { label: string; bytes: string }>> => {
+        const rows = (await engine.find('sys_metadata', { where: { type: 'dashboard', name, state: 'active' }, context: { isSystem: true } } satisfies EngineQueryOptions)) as any[];
+        return Object.fromEntries(rows.map((row) => [String(row.package_id ?? null), {
+            label: JSON.parse(String(row.metadata)).label,
+            bytes: JSON.stringify([row.metadata, row.version, row.checksum ?? null]),
+        }]));
+    };
+    const layRow = (engine: ObjectQL, name: string, packageId: string | null, label: string) => engine.insert('sys_metadata', {
+        type: 'dashboard', name, namespace: 'default', package_id: packageId, scope: 'platform', strategy: 'merge', state: 'active', version: 1,
+        metadata: JSON.stringify({ name, label, widgets: [] }),
+    }, { context: { isSystem: true } } as any);
+    const bareLabel = async (booted: SaveBooted, name: string) => {
+        const read = await get(booted.kernel, `/meta/dashboard/${name}`);
+        return [read.status, unwrap(read.body)?.item?.label];
+    };
+    const expectRefusedNamingBoth = (answer: { status: number | undefined; body: any }, e: string, d: string) => {
+        expect([answer.status, codeOf(answer.body)], JSON.stringify(answer.body)).toEqual([409, 'RESOURCE_CONFLICT']);
+        for (const id of [e, d]) expect(JSON.stringify(answer.body)).toContain(id);
+    };
+
+    describe.each([
+        { regOrder: 'disabled first', transport: 'dispatcher' as const, order: [CODE_D, CODE_E] },
+        { regOrder: 'enabled first', transport: 'dispatcher' as const, order: [CODE_E, CODE_D] },
+        { regOrder: 'disabled first', transport: 'rest' as const, order: [CODE_D, CODE_E] },
+        { regOrder: 'enabled first', transport: 'rest' as const, order: [CODE_E, CODE_D] },
+    ])('$transport, packages registered $regOrder', ({ transport, order }) => {
+        let booted: SaveBooted | undefined;
+        beforeAll(async () => { booted = await bootSaveKernel(order, transport); }, 120_000);
+        afterAll(async () => {
+            if (!booted) return;
+            if (booted.kernel.getState() === 'running') await booted.kernel.shutdown();
+            rmSync(booted.root, { recursive: true, force: true });
+        });
+        const withDisabled = async (id: string, body: () => Promise<void>) => {
+            booted!.engine.registry.disablePackage(id);
+            try { await body(); } finally { booted!.engine.registry.enablePackage(id); }
+        };
+
+        it('both ship it, no stored row: the save writes a row bound to E and no package-unbound row', async () => {
+            await withDisabled(CODE_D, async () => {
+                const saved = await booted!.put('ship_none_dash', 'edited');
+                expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, 'ship_none_dash');
+                expect(Object.keys(rows)).toEqual([CODE_E]);
+                expect(rows[CODE_E]?.label).toBe('edited');
+                expect(await bareLabel(booted!, 'ship_none_dash')).toEqual([200, 'edited']);
+            });
+        });
+
+        it('both ship it, D\'s row alone: the save writes E\'s row, D\'s row is byte-unchanged, the next read shows the edit; re-enabled, read and save refuse naming both', async () => {
+            await layRow(booted!.engine, 'ship_drow_dash', CODE_D, 'disabled row');
+            const before = await storedRows(booted!.engine, 'ship_drow_dash');
+            await withDisabled(CODE_D, async () => {
+                const saved = await booted!.put('ship_drow_dash', 'edited');
+                expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, 'ship_drow_dash');
+                expect(Object.keys(rows).sort()).toEqual([CODE_E, CODE_D].sort());
+                expect(rows[CODE_E]?.label).toBe('edited');
+                expect(rows[CODE_D]?.bytes).toBe(before[CODE_D]?.bytes);
+                expect(await bareLabel(booted!, 'ship_drow_dash')).toEqual([200, 'edited']);
+            });
+            const settled = await storedRows(booted!.engine, 'ship_drow_dash');
+            expectRefusedNamingBoth(await get(booted!.kernel, '/meta/dashboard/ship_drow_dash'), CODE_E, CODE_D);
+            expectRefusedNamingBoth(await booted!.put('ship_drow_dash', 'again'), CODE_E, CODE_D);
+            expect(await storedRows(booted!.engine, 'ship_drow_dash')).toEqual(settled);
+        });
+
+        it.each([
+            { saveOrder: 'D saved first', name: 'ship_de_dash', saved: [CODE_D, CODE_E] },
+            { saveOrder: 'E saved first', name: 'ship_ed_dash', saved: [CODE_E, CODE_D] },
+        ])('both ship it, a row of each ($saveOrder): the save updates E\'s row (was 409) and D\'s is byte-unchanged', async ({ name, saved }) => {
+            for (const id of saved) await layRow(booted!.engine, name, id, `${id === CODE_D ? 'disabled' : 'enabled'} row`);
+            const before = await storedRows(booted!.engine, name);
+            await withDisabled(CODE_D, async () => {
+                const answer = await booted!.put(name, 'edited');
+                expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, name);
+                expect(rows[CODE_E]?.label).toBe('edited');
+                expect(rows[CODE_D]?.bytes).toBe(before[CODE_D]?.bytes);
+                expect(Object.keys(rows).sort()).toEqual([CODE_E, CODE_D].sort());
+            });
+            expectRefusedNamingBoth(await booted!.put(name, 'again'), CODE_E, CODE_D);
+        });
+
+        it('E ships it and an authored D holds only a row: the save writes E\'s row and D\'s row is byte-unchanged', async () => {
+            await layRow(booted!.engine, 'e_authored_drow_dash', AUTH_D, 'disabled row');
+            const before = await storedRows(booted!.engine, 'e_authored_drow_dash');
+            await withDisabled(AUTH_D, async () => {
+                const saved = await booted!.put('e_authored_drow_dash', 'edited');
+                expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, 'e_authored_drow_dash');
+                expect(Object.keys(rows).sort()).toEqual([CODE_E, AUTH_D].sort());
+                expect(rows[CODE_E]?.label).toBe('edited');
+                expect(rows[AUTH_D]?.bytes).toBe(before[AUTH_D]?.bytes);
+                expect(await bareLabel(booted!, 'e_authored_drow_dash')).toEqual([200, 'edited']);
+            });
+        });
+
+        it.each([
+            { saveOrder: 'D saved first', name: 'authored_de_dash', saved: [AUTH_D, AUTH_E] },
+            { saveOrder: 'E saved first', name: 'authored_ed_dash', saved: [AUTH_E, AUTH_D] },
+        ])('two authored row holders ($saveOrder), D disabled: the save updates E\'s row and D\'s is byte-unchanged; re-enabled, read and save refuse naming both', async ({ name, saved }) => {
+            for (const id of saved) await layRow(booted!.engine, name, id, `${id === AUTH_D ? 'disabled' : 'enabled'} row`);
+            const before = await storedRows(booted!.engine, name);
+            await withDisabled(AUTH_D, async () => {
+                const answer = await booted!.put(name, 'edited');
+                expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, name);
+                expect(Object.keys(rows).sort()).toEqual([AUTH_E, AUTH_D].sort());
+                expect(rows[AUTH_E]?.label).toBe('edited');
+                expect(rows[AUTH_D]?.bytes).toBe(before[AUTH_D]?.bytes);
+                expect(await bareLabel(booted!, name)).toEqual([200, 'edited']);
+            });
+            const settled = await storedRows(booted!.engine, name);
+            expectRefusedNamingBoth(await get(booted!.kernel, `/meta/dashboard/${name}`), AUTH_E, AUTH_D);
+            expectRefusedNamingBoth(await booted!.put(name, 'again'), AUTH_E, AUTH_D);
+            expect(await storedRows(booted!.engine, name)).toEqual(settled);
+        });
+
+        it('two authored row holders served beside a disabled one: the save refuses naming only the served two, and writes nothing', async () => {
+            for (const id of [AUTH_D, AUTH_E, AUTH_F]) await layRow(booted!.engine, 'authored_three_dash', id, `${id} row`);
+            const before = await storedRows(booted!.engine, 'authored_three_dash');
+            await withDisabled(AUTH_D, async () => {
+                const answer = await booted!.put('authored_three_dash', 'edited');
+                expectRefusedNamingBoth(answer, AUTH_E, AUTH_F);
+                expect(JSON.stringify(answer.body)).not.toContain(AUTH_D);
+                expect(await storedRows(booted!.engine, 'authored_three_dash')).toEqual(before);
+            });
+        });
+
+        it('E ships it, two authored row holders beside a disabled one: the save refuses naming only the enabled two', async () => {
+            for (const id of [AUTH_D, AUTH_E, AUTH_F]) await layRow(booted!.engine, 'e_two_authored_dash', id, `${id} row`);
+            const before = await storedRows(booted!.engine, 'e_two_authored_dash');
+            await withDisabled(AUTH_D, async () => {
+                const answer = await booted!.put('e_two_authored_dash', 'edited');
+                expectRefusedNamingBoth(answer, AUTH_E, AUTH_F);
+                expect(JSON.stringify(answer.body)).not.toContain(AUTH_D);
+                expect(await storedRows(booted!.engine, 'e_two_authored_dash')).toEqual(before);
+            });
+        });
+
+        it('E ships it, a package-unbound row and an authored D\'s row: the save edits the package-unbound row the read serves, and D\'s is byte-unchanged', async () => {
+            await layRow(booted!.engine, 'e_unbound_drow_dash', null, 'environment row');
+            await layRow(booted!.engine, 'e_unbound_drow_dash', AUTH_D, 'disabled row');
+            const before = await storedRows(booted!.engine, 'e_unbound_drow_dash');
+            await withDisabled(AUTH_D, async () => {
+                expect(await bareLabel(booted!, 'e_unbound_drow_dash')).toEqual([200, 'environment row']);
+                const saved = await booted!.put('e_unbound_drow_dash', 'edited');
+                expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, 'e_unbound_drow_dash');
+                expect(Object.keys(rows).sort()).toEqual([AUTH_D, 'null'].sort());
+                expect(rows.null?.label).toBe('edited');
+                expect(rows[AUTH_D]?.bytes).toBe(before[AUTH_D]?.bytes);
+                expect(await bareLabel(booted!, 'e_unbound_drow_dash')).toEqual([200, 'edited']);
+            });
+        });
+
+        it('CONTROL: a name one enabled package ships, beside a disabled package that does not hold it, saves as before (the package-unbound overlay)', async () => {
+            await withDisabled(CODE_D, async () => {
+                const saved = await booted!.put('e_only_dash', 'edited');
+                expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, 'e_only_dash');
+                expect([Object.keys(rows), rows.null?.label]).toEqual([['null'], 'edited']);
+            });
+        });
+
+        it('CONTROL: a name only the disabled D holds (its row alone) is saved as before, at D\'s address (no served holder takes it)', async () => {
+            await layRow(booted!.engine, 'authored_donly_dash', AUTH_D, 'disabled row');
+            await withDisabled(AUTH_D, async () => {
+                const saved = await booted!.put('authored_donly_dash', 'edited');
+                expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+                const rows = await storedRows(booted!.engine, 'authored_donly_dash');
+                expect([Object.keys(rows), rows[AUTH_D]?.label]).toEqual([[AUTH_D], 'edited']);
+            });
+        });
+    });
 });

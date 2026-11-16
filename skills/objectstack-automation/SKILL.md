@@ -13,7 +13,7 @@ license: Apache-2.0
 compatibility: Requires @objectstack/spec 18.x (Zod v4 schemas)
 metadata:
   author: objectstack-ai
-  version: "18.4.0"
+  version: "18.5.0"
   domain: automation
   tags: flow, workflow, trigger, approval, state-machine, scheduled, webhook
 ---
@@ -22,8 +22,7 @@ metadata:
 
 ## When to Use This Skill
 
-Flows, state machines and approvals, triggers, vendor integrations and
-their callbacks, and **assignment rules**.
+Also vendor-integration callbacks and **assignment rules**.
 
 > **Predicates and conditions are CEL** — every `condition` / `guard` /
 > `entryCondition` / filter `value` is an **Expression** envelope: a plain CEL
@@ -70,11 +69,11 @@ Built-in (plugins register more):
 | `decision` | Conditional branching — routed by **edge `condition` predicates**, not node config |
 | `loop` | Iterate a **nested `config.body` region** once per item of `config.collection` — a CEL value envelope or an inline list, never a string; `iteratorVariable` (default `item`) and optional `indexVariable` bind inside it, `maxIterations` caps it |
 | `parallel` | Fan out into `config.branches[]` (≥ 2 regions) run concurrently, **joined implicitly** at block end |
-| `try_catch` | Run `config.try`; on failure run `config.catch` with the error in `errorVariable` (default `$error`); `config.retry` re-runs `try` with backoff first. **No `finally`** — the container's ordinary out-edges are the continuation |
+| `try_catch` | Run `config.try`; on failure run `config.catch` with the error in `errorVariable` (default `$error`); `config.retry` re-runs `try` with backoff first; in a `record-after-*` flow it (or `errorHandling.strategy: 'retry'`) may not reach an inline `http` / `connector_action`: the save would wait out every attempt. Inside a `subflow` / `map` child, retried by either flow, that is **silent**: the flow saves but never arms (`GET /api/v1/automation/_status`: `bound: false`, `unboundCause: retried_callout_in_subflow`) until the child's `http` is `durable: true` or nothing retries the call. **No `finally`** — the container's ordinary out-edges are the continuation |
 | `map` | Sequential multi-instance — invoke the `config.flowName` flow (named as `subflow`'s) per item of `config.collection` (shaped as `loop`'s); each may pause (batch approvals); a refused name fails it at the first item |
 | `wait` | Pause execution until a timer elapses or a named signal arrives |
 | `subflow` | Invoke the flow bare `config.flowName` names: a package's flow gets its own, else the one holder in its `dependencies` closure plus `sys`; a package-less flow, the environment's, else the one package holder. Else `os validate` passes and the node fails at run time (`subflow 'X' failed: …` naming every candidate; no `code`): `outside-closure` — held only by an undeclared package (declare it) or the environment; `ambiguous-in-closure` / `ambiguous-in-environment` — two packages hold it (package / package-less caller) |
-| `parallel_gateway` / `join_gateway` / `boundary_event` | **Not author-facing** — BPMN-interop forms a `parallel` / `try_catch` container lowers into; author the container |
+| `parallel_gateway` / `join_gateway` / `boundary_event` | BPMN-interop forms a `parallel` / `try_catch` container lowers into; author the container |
 
 #### Data Operations
 
@@ -91,11 +90,11 @@ Built-in (plugins register more):
 
 | Node | Purpose |
 |:-----|:--------|
-| `http` | Call an external HTTP API — always set `timeoutMs` (unset = no timeout). `url` and `headers` are served as written with the definition to every member who can read flows — only `signingSecret` and a start node's `secret` are withheld — so never a credential there: a credential means a declared connector called via `connector_action` |
+| `http` | Call an external HTTP API — always set `timeoutMs` (unset = no timeout). `url` and `headers` are served as written with the definition to every member who can read flows — only `signingSecret` and a start node's `secret` are withheld — so never a credential there: a credential means a declared connector called via `connector_action`. Retried after a record change: `durable: true` (outbox-queued, else sent once in the background, unretried; no response) |
 | `notify` | Send a notification (below) |
-| `connector_action` | Dispatch an action of a declared connector (§ *Integrations are declared, not coded*) or a plugin's. `connectorConfig.input` is a value-slot map like `subflow` `input`. Once evaluated, it is judged against the action's `inputSchema` (`required`, `type`, `properties`, `items`) before dispatch: a breach fails the step `VALIDATION_ERROR` (`fault`-routable); `os validate` does not judge the `inputSchema` fit yet |
+| `connector_action` | Dispatch an action of a declared connector (§ *Integrations are declared, not coded*) or a plugin's. `connectorConfig.input` is a value-slot map like `subflow` `input`. Once evaluated, it is judged against the action's `inputSchema` (`required`, `type`, `properties`, `items`) before dispatch: a breach fails the step `VALIDATION_ERROR` (`fault`-routable); `os validate` does not judge the `inputSchema` fit yet. Retried after a record change: drop the retry, or run the flow on demand / on a schedule |
 | `script` | Call a **registered** function (*Valid-but-silently-wrong* #3) |
-| `screen` | Display a UI form to the user (screen flows only). `config.fields[]`: `{ name, label, type, required, options, defaultValue }`, `type` an open widget hint; `'file'` renders the upload widget and resumes with the `sys_file` id bound to `name` — a later `create_record` / `update_record` writes it into a `file` field, which claims the file: collect first, write after the last screen. `'record_link'` (never `'record'`, an object field type) takes no input — it shows the `reference` record whose id `defaultValue` evaluates to, by display name, as a link to its record page: the result screen of a flow that created records, `{ name: 'account_link', type: 'record_link', reference: 'crm_account', defaultValue: { dialect: 'cel', source: 'account.id' } }` over a `create_record` `outputVariable: 'account'`. Both keys required; `required` / `options` / `placeholder` / `min` / `max` refused; a resume value under its name refused (`400 INVALID_SCREEN_INPUT`). A completed `end` `message` is refused and a markdown link in a screen `description` renders literally. Next / Submit and "Step N of M" are not authored: the engine reads the graph when the screen pauses and serves `progress` (`nextScreen: 'none' | 'possible' | 'certain'`; `step` / `stepCount` only when every path agrees), which alone labels the button and draws the counter. A `decision`, `fault` edge, loop back, non-screen pause (`approval`, `wait`) or `subflow` after a screen answers `possible` — "Next", no count. `progress` in a node `config` is refused |
+| `screen` | Display a UI form to the user (screen flows only). `config.fields[]`: `{ name, label, type, required, options, defaultValue }`, `type` an open widget hint; `'file'` renders the upload widget and resumes with the `sys_file` id bound to `name` — a later `create_record` / `update_record` writes it into a `file` field, which claims the file: collect first, write after the last screen. `'record_link'` (never `'record'`, an object field type) takes no input — it shows the `reference` record whose id `defaultValue` evaluates to, by display name, as a link to its record page: the result screen of a flow that created records, `{ name: 'account_link', type: 'record_link', reference: 'crm_account', defaultValue: { dialect: 'cel', source: 'account.id' } }` over a `create_record` `outputVariable: 'account'`. Both keys required; `required` / `options` / `placeholder` / `min` / `max` refused; a resume value under its name refused (`400 INVALID_SCREEN_INPUT`). A completed `end` `message` is refused and a markdown link in a screen `description` renders literally. Next / Submit and "Step N of M" are not authored: the engine reads the graph when the screen pauses and serves `progress`, which alone labels the button and draws the counter. A `decision`, `fault` edge, loop back, non-screen pause (`approval`, `wait`) or `subflow` after a screen means "Next", no count. `progress` in a node `config` is refused |
 
 #### Human Decision
 
@@ -105,15 +104,14 @@ Built-in (plugins register more):
 
 ### `notify`
 
-`NotifyConfigSchema` is `strictObject` — an undeclared key is a named parse
-error. **RAW** keys are read as written: a
-`{token}` in one is refused.
+An undeclared key is a named parse error. **RAW** keys are read as written:
+a `{token}` in one is refused.
 
 <!-- os:check -->
 ```ts
 import type { FlowNode } from '@objectstack/spec/automation';
 const notify: FlowNode = { id: 'tell_owner', type: 'notify', label: 'Notify Owner', config: {
-    recipients: { dialect: 'cel', source: 'record.assignee' }, // REQUIRED — id, list, or envelope; a CSV is ONE id.
+    recipients: { dialect: 'cel', source: 'record.owner_id' }, // REQUIRED — id, list, or envelope; a CSV is ONE id.
     // 4th form `{ emailField: 'applicant_email' }`: an `email` field of the trigger record, for a non-user —
     // then `channels: 'email'` alone. An envelope must yield USER ids: an address no user holds fails the node
     title: 'Done: {{ record.title }}', // inline; XOR `template` (RAW, localizable)
@@ -130,8 +128,8 @@ const notify: FlowNode = { id: 'tell_owner', type: 'notify', label: 'Notify Owne
 A recipient string, written or evaluated, may be an audience selector:
 
 - `team:ID` — that team's members.
-- `owner_of:OBJECT:ID` — that record's owner.
-- `org:members` — every member of the run's organization, else that of the record the notification is about; any other `org:` value reaches nobody, with a warning.
+- `owner_of:OBJECT:ID` — that record's owner; a computed id: `source: "'owner_of:crm_case:' + record.case_id"`.
+- `org:members` — every member of the run's organization, else that of the record the notification is about, else nobody (`single` posture: a `schedule` flow declaring no `organization`, no record). Any other `org:` value reaches nobody too. Each warns in the server log only; the node succeeds.
 
 An option label in a notice: `{{ stage | option:opportunity.stage }}` in the mail
 `template` (each recipient's language; mail-only, refused in inline `title` /
@@ -140,8 +138,7 @@ fan-out.
 
 ### Flow Variables
 
-`variables` is an **array** —
-not a name-keyed map; a variable has no `label`: `variables: [{ name: 'case_id',
+`variables` is an **array**; a variable has no `label`: `variables: [{ name: 'case_id',
 type: 'text', isInput: true }, { name: 'approval_result', type: 'boolean', isOutput: true }]`.
 
 → [references/examples-flows.md](./references/examples-flows.md) § Flow Example — Auto-Escalate Overdue Cases.
@@ -152,8 +149,8 @@ type: 'text', isInput: true }, { name: 'approval_result', type: 'boolean', isOut
 > routes a failed node to a handler instead of ending the run. **A
 > `label: 'error'` alone does nothing:** an ordinary edge
 > traverses on SUCCESS (`objectstack validate` reports `flow-error-label-not-fault`).
-> A handled failure does not consume a flow-level `errorHandling.retry`, which
-> replays from the start — prefer a fault edge for a local failure. The handler
+> A handled failure does not consume the flow-level retry
+> (`errorHandling.strategy: 'retry'`), which replays from the start — prefer a fault edge for a local failure. The handler
 > reads `{{ <nodeId>.error }}` (run-wide `{{ $error.message }}`; in CEL,
 > `vars["$error"]`); the run then reports success and the failed step stays in the trace.
 
@@ -190,11 +187,11 @@ type: 'text', isInput: true }, { name: 'approval_result', type: 'boolean', isOut
 > writes across every tenant; filter on the platform-injected tenant column, never
 > re-declare it per object.
 
-> **Who may START a flow: `requiredPermissions: ['…']` on the flow** (ADR-0066
-> D4) — the four entrances above refuse a non-system caller missing any named
-> capability with `403 PERMISSION_DENIED`; an action starting it inherits the
-> list, a `subflow` node is not an entrance. Gate an elevated `screen` / `api`
-> flow here, never on `current_user.positions` inside it.
+> **Who may START a flow: `requiredPermissions: ['…']` on the flow** — the
+> four entrances above refuse a non-system caller missing any named capability
+> with `403 PERMISSION_DENIED`; an action starting it inherits the list, a
+> `subflow` node is not an entrance. Gate an elevated `screen` / `api` flow
+> here, never on `current_user.positions` inside it.
 
 > **A hook elevates itself with `runAs`, never with `sudo`.** An object hook
 > (objectstack-data) declares its own `runAs: 'system' | 'user' | 'inherit'` —
@@ -202,8 +199,7 @@ type: 'text', isInput: true }, { name: 'approval_result', type: 'boolean', isOut
 > hook's `ctx.api` data operations only, on the in-process `handler` and the
 > sandboxed `body` alike. A `'user'` hook whose trigger resolved no user has
 > nothing to scope to: its `ctx.api` data operations are refused
-> (`HOOK_UNSCOPED_DATA_ACCESS`, 403) rather than run unscoped — declare
-> `runAs: 'system'` when the elevation is intended.
+> (`HOOK_UNSCOPED_DATA_ACCESS`, 403) rather than run unscoped.
 
 ### Filter operands (`config.filter`)
 
@@ -221,8 +217,8 @@ type: 'text', isInput: true }, { name: 'approval_result', type: 'boolean', isOut
   the remedy.
 - **A computed operand is a value, never a query operator**: a string, number,
   bigint, boolean or date, or at an `$in` / `$nin` / `$between` comparand a list
-  of them with no empty entry. Anything else fails the node as a guard before the
-  query runs. Make the expression evaluate to the compared value (for a record,
+  of them with no empty entry. Anything else fails the node as a guard.
+  Make the expression evaluate to the compared value (for a record,
   its `id`), and write conditions in the filter itself.
 
 ---
@@ -250,7 +246,8 @@ Most are caught by `objectstack build`:
 
    Text slots (notify `title` / `message` / `actionUrl`, screen `title` /
    `description`, end `message`, `http` `url` / `headers`) render `{{ }}`
-   holes — a variable path, optional formatter, no logic; a `{…}` token there
+   holes — a variable path, optional formatter (a `default:` argument is
+   literal text, never a path), no logic; a `{…}` token there
    is refused with its `{{ }}` spelling. A date or the run user has no hole:
    assign it first (`assignments: { v: { dialect: 'cel', source:
    'current_user.id' } }`), then write `{{ v }}`.
@@ -261,23 +258,23 @@ Most are caught by `objectstack build`:
 
 3. **`script` nodes call a registered function — nothing else.** `config.function`
    (**required**: an empty node refuses at execute, an unregistered name fails
-   loudly) names one registered in `defineStack({ functions })` (below).
+   loudly) names one registered in `defineStack({ functions })`.
 
    **The name resolves from the flow's package, as `subflow`'s `flowName`
-   does**, the platform's function (registered under no package) in every
-   flow's reach; a `.custom` override reads as a package-less flow. `acme.crm`
-   and `acme.sales` both shipping `normalize_phone` each run their own (the boot
-   warns `Bare-name conflict at boot`). If the flow's package holds none, two
-   holders in reach (the platform's counts) or one only outside its
-   `dependencies` closure fail the step as a guard (no `fault` edge;
-   `$error.code: 'RESOURCE_CONFLICT'` in a `try_catch`); a flow door answers
-   `400 FLOW_FAILED`, `error.details.innerRefusal` naming each holder. Fix:
-   declare the dependency, or rename.
+   does**, the platform's ownerless function in every flow's reach; a
+   `.custom` override reads as a package-less flow. Packages of two
+   `namespace`s each run their own `normalize_phone`. One namespace (or
+   none): both held at boot warn `Bare-name conflict at boot`; a later one
+   installs but binds NONE of its functions or hooks (error `Failed to bind
+   declarative hooks`): rename, or another namespace. If the flow's package
+   holds none, two holders in reach or one only outside its `dependencies`
+   closure fail the step as a guard (no `fault` edge; `$error.code:
+   'RESOURCE_CONFLICT'` in a `try_catch`); a flow door's `innerRefusal` names
+   each holder. Fix: declare the dependency, or rename.
 
    **A flow `function` is a PURE compute step — it does NOT read/write the
-   database.** It receives `ctx.input` and **returns** a value; `config.outputVariable`
-   exposes that value as a flow variable, and a later **declarative** node persists
-   it:
+   database.** It receives `ctx.input` and **returns** a value; a later
+   **declarative** node persists its `outputVariable`:
 
    ```ts
    { id: 'ai', type: 'script', config: {
@@ -291,9 +288,6 @@ Most are caught by `objectstack build`:
        fields: { ai_category: { dialect: 'cel', source: 'ai.ai_category' } },
    } },
    ```
-
-   Data-lifecycle **side effects** (read/write other records) are an L2 **hook**
-   (objectstack-data).
 
    A function that writes where the platform cannot see **declares** it, so the
    run reports "cannot say" rather than `acted: 0`:
@@ -322,7 +316,7 @@ Most are caught by `objectstack build`:
 `assignmentRules` on the stack routes each inserted
 row of an `ownership: 'user'` object whose `owner_id` and `queue` are both still
 empty — once, after every `beforeInsert` hook, never on update, never refusing the
-insert (ADR-0142 D5). Entries are ordered; the first whose `criteria` (CEL over
+insert. Entries are ordered; the first whose `criteria` (CEL over
 `record.*`) match decides:
 
 <!-- os:check -->
@@ -347,7 +341,7 @@ names one owner, who holds the row only while an active member of its organizati
 for the same people is a `queue` approver ([Approver Types](./references/state-machines-and-approvals.md#approver-types)).
 ⛔ Never a `beforeInsert` hook that picks an owner, nor a round-robin counter field.
 
-**A packaged rule's queue** (ADR-0150 D3) is its package's own, else the one holder
+**A packaged rule's queue** is its package's own, else the one holder
 in its `dependencies` closure plus `sys`: `acme.helpdesk` naming `acme.crm`'s queue
 declares `dependencies: { 'acme.crm': '^1.0.0' }`. Else refused — `outside-closure`
 (an undeclared package's or environment-only queue), `ambiguous-in-closure` (two
@@ -400,15 +394,15 @@ the **start node `config`**:
 
 ### Trigger Types (start-node `config.triggerType`)
 
-| `triggerType` | Fires | ObjectQL hook |
-|:------|:------|:------|
-| `record-before-create` | before insert (can modify/reject) | `beforeInsert` |
-| `record-after-create` | after insert | `afterInsert` |
-| `record-before-update` | before update | `beforeUpdate` |
-| `record-after-update` | after update | `afterUpdate` |
-| `record-before-delete` | before delete | `beforeDelete` |
-| `record-after-delete` | after delete | `afterDelete` |
-| `record-before-write` / `record-after-write` | create OR update — one flow, both events | both insert + update hooks |
+| `triggerType` | ObjectQL hook |
+|:------|:------|
+| `record-before-create` (can modify/reject) | `beforeInsert` |
+| `record-after-create` | `afterInsert` |
+| `record-before-update` | `beforeUpdate` |
+| `record-after-update` | `afterUpdate` |
+| `record-before-delete` | `beforeDelete` |
+| `record-after-delete` | `afterDelete` |
+| `record-before-write` / `record-after-write` — one flow, both events | insert + update hooks |
 
 ### Trigger Configuration — on the `start` node
 
@@ -428,8 +422,7 @@ A flow around it also owns `label`, `type`, `nodes` and the `edges`
 }
 ```
 
-> **Prefer `record-after-*`** unless you must modify or reject the record;
-> **guard** one that writes its own object, or it re-triggers itself. A
+> **Prefer `record-after-*`**; **guard** one that writes its own object, or it re-triggers itself. A
 > `record-before-*` flow that throws silently blocks the write — give it a
 > user-facing message.
 
@@ -442,8 +435,7 @@ A flow around it also owns `label`, `type`, `nodes` and the `edges`
 A vendor system reachable over HTTP is a
 `connectors:` entry inside the app — `provider: 'openapi' | 'mcp' | 'rest'`, a
 packaged spec, `auth.credentialRef` (the customer's administrator supplies the
-value) — dispatched by `connector_action`; an inbound vendor callback is an
-`api` flow. Never a plugin. Recipes,
+value) — dispatched by `connector_action`. Never a plugin. Recipes,
 credential hand-off, loader limits: [references/integration-recipes.md](./references/integration-recipes.md).
 Platform code only when one holds — and then it is the platform's, filed as a
 card, the app still writing none: the protocol is not HTTP; the work writes
@@ -456,14 +448,8 @@ action contract spans several vendors; the callback is signed in no form
 
 ## Verify your work
 
-A bare ref (`status == 'open'`) resolves (fields are flattened into scope), so
-a typo there is only an advisory did-you-mean; `record.status` stays canonical
-and `os validate` errors on an unknown `record.<field>`:
-
-```bash
-os validate     # CEL/predicate validation + schema
-# or: os build  # the same gates, plus emits dist/
-```
+`os validate` (`os build` also emits `dist/`); CEL checks: **objectstack-formula**
+§ Verify your work.
 
 ---
 

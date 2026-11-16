@@ -120,7 +120,8 @@ export const zhCNObjects: NonNullable<TranslationData['objects']> = {
         help: "该身份的创建方式——idp_provisioned（联合 SSO 即时开通）或 env_native（本地注册 / 应用最终用户）。系统维护，请勿编辑。",
         options: {
           idp_provisioned: "IdP 开通",
-          env_native: "本地账号"
+          env_native: "本地账号",
+          idp_pending: "Pending SSO Sign-In"
         }
       },
       id: {
@@ -214,6 +215,54 @@ export const zhCNObjects: NonNullable<TranslationData['objects']> = {
             "user.phoneNumber": "手机号",
             permissionSet: "权限集",
             temporaryPassword: "临时密码：请立即复制，它只显示一次，不会被保存"
+          }
+        }
+      },
+      add_sso_user: {
+        label: "添加用户",
+        description: "在对方首次登录前按邮箱地址添加。对方通过你所在组织的身份提供方登录；这里不设置密码。",
+        params: {
+          positions: {
+            label: "岗位",
+            helpText: "可选。此人从被添加起就担任的岗位。"
+          },
+          permissionSets: {
+            label: "权限集",
+            helpText: "可选。把此权限集授予此人，使其首次登录即可打开自己的应用。"
+          },
+          manager: {
+            label: "上级邮箱",
+            helpText: "可选。此人上级的邮箱地址，须是本环境中的用户。"
+          }
+        },
+        resultDialog: {
+          title: "用户已添加",
+          acknowledge: "完成",
+          fields: {
+            email: "邮箱",
+            notApplied: "此人仍待激活，以下内容未生效（请在其记录上设置）",
+            managerError: "上级",
+            "host.reason": "邀请未发出"
+          }
+        }
+      },
+      import_sso_users: {
+        label: "导入用户",
+        description: "从 CSV 文本一次添加多人。每一行单独添加，某一行出错只影响该行。他们通过你所在组织的身份提供方登录；这里不设置密码。",
+        params: {
+          csv: {
+            label: "CSV",
+            helpText: "第一行为表头，之后每行一人，最多 500 行。列：email、name、positions 和 permission_sets（机器名，用 ; 分隔）以及 manager_id（上级的邮箱地址）。"
+          }
+        },
+        resultDialog: {
+          title: "导入完成",
+          acknowledge: "完成",
+          fields: {
+            "summary.added": "已添加",
+            "summary.alreadyPending": "已在待激活中，已再次通知",
+            "summary.failed": "未添加",
+            rows: "逐行结果"
           }
         }
       },
@@ -400,7 +449,7 @@ export const zhCNObjects: NonNullable<TranslationData['objects']> = {
   sys_session: {
     label: "会话",
     pluralLabel: "会话",
-    description: "活跃的用户会话",
+    description: "用户会话",
     fields: {
       user_id: {
         label: "用户"
@@ -2167,6 +2216,18 @@ export const zhCNObjects: NonNullable<TranslationData['objects']> = {
             label: "发现文档 URL",
             helpText: "可选。OIDC 发现文档 URL（https）。留空则推导为 `<issuer>/.well-known/openid-configuration`。在此填写的端点会被此提供方信任。"
           },
+          authorizationEndpoint: {
+            label: "Authorization URL",
+            helpText: "Optional. OIDC authorization endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names an authorization host the server does not trust."
+          },
+          tokenEndpoint: {
+            label: "Token URL",
+            helpText: "Optional. OIDC token endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a token host the server does not trust. Google: https://oauth2.googleapis.com/token"
+          },
+          jwksEndpoint: {
+            label: "JWKS URL",
+            helpText: "Optional. URL of the IdP’s signing-key set (JWKS, https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a key-set host the server does not trust. Google: https://www.googleapis.com/oauth2/v3/certs"
+          },
           userInfoEndpoint: {
             label: "Userinfo 端点 URL",
             helpText: "可选。OIDC userinfo 端点 URL（https），取代发现文档中给出的端点。在此填写的端点会被此提供方信任：当注册因发现文档给出的 userinfo 主机不受服务器信任而被拒绝时，请在此填写。"
@@ -2253,6 +2314,11 @@ export const zhCNObjects: NonNullable<TranslationData['objects']> = {
             label: "映射：组属性",
             helpText: "可选。携带用户所属组的断言属性。每次登录都会授予映射到这些组的权限集。留空则不映射任何组。",
             placeholder: "groups"
+          },
+          mapAccountKey: {
+            label: "Map: Account key attribute",
+            helpText: "Optional. Assertion attribute with one stable value per person that the IdP sets and the user cannot edit (Entra ID object id, Okta user id; never an email, name or other attribute a user can change), used as the account key instead of the NameID, so a sign-in from your sign-in page and one from the IdP’s app portal reach the same account, and an email change keeps it. Leave blank for the default: Microsoft Entra ID (IdP Entity ID on sts.windows.net or login.microsoftonline.com) uses http://schemas.microsoft.com/identity/claims/objectidentifier, every other IdP the NameID. Set it when the provider is registered: accounts already made keep the key they were made with.",
+            placeholder: "http://schemas.microsoft.com/identity/claims/objectidentifier"
           }
         }
       },

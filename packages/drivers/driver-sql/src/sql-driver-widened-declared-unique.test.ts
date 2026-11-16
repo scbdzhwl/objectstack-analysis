@@ -34,7 +34,9 @@ import {
   diffManagedIndexes,
   enforcedIndexKey,
   hashShadowColumnFor,
+  hashShadowDigestSql,
   legacyUniqueReplacements,
+  parseFunctionalRowScopedGuard,
   parseHashShadowKeyParts,
   parseHashShadowRowScope,
   type PhysicalIndex,
@@ -49,6 +51,8 @@ const ledgerIndexes = [{ fields: ['metadata_type', 'package_id', 'name'], unique
 const plain = (name: string, columns: string[], unique = true): PhysicalIndex => ({ name, columns, unique });
 /** The package-less guard `metadata-protocol` builds at boot: a partial UNIQUE on the narrower key. */
 const GUARD_NAME = 'uniq_sys_metadata_activation_packageless';
+/** The `(created_at, id)` index every managed table carries since #33695 (`IMPLICIT_SYSTEM_COLUMN_KEYS`). */
+const DEFAULT_ORDER = `idx_${LEDGER}_created_at_id`;
 const guard: PhysicalIndex = { name: GUARD_NAME, columns: ['metadata_type', 'name'], unique: true, partial: true };
 
 /** The differ's verdict over the ledger as this release declares it, composed as `detectTableIndexDrift` composes it. */
@@ -302,6 +306,168 @@ describe('a row-scoped hash shadow (MariaDB package-less guard) — pure functio
   });
 });
 
+// ---------------------------------------------------------------------------
+// MySQL 8's spelling of the package-less guard: a functional key part
+// ---------------------------------------------------------------------------
+
+/**
+ * MySQL 8.0.13+ builds the guard as a UNIQUE index over ONE functional key part,
+ * `(CASE WHEN package_id IS NULL THEN <digest of metadata_type, name> END)`
+ * (`buildActivationLedgerPackagelessIndexSql('mysql2')`). The expression below
+ * is the one MySQL 8.0.46 stores in `information_schema.STATISTICS.EXPRESSION`
+ * for that statement, measured; `introspectIndexes` records it verbatim as the
+ * index's one expression, with no column.
+ */
+const MYSQL_GUARD_EXPR =
+  '(case when (`package_id` is null) then unhex(sha2(concat(`metadata_type`,0x1f,`name`),256)) end)';
+const mysqlGuard = (expression = MYSQL_GUARD_EXPR): PhysicalIndex => ({
+  name: GUARD_NAME,
+  columns: [],
+  unique: true,
+  expressions: [expression],
+});
+
+describe('a functional row-scoped digest (MySQL 8 package-less guard) — pure functions', () => {
+  it('reads as a partial unique on the digest\'s columns, scoped by the column its WHEN tests', () => {
+    expect(parseFunctionalRowScopedGuard(MYSQL_GUARD_EXPR)).toEqual({ rowScope: 'package_id', columns: ['metadata_type', 'name'] });
+  });
+
+  it('the digest it accepts is the driver\'s own hash-shadow digest, spelled as MySQL stores it', () => {
+    const stored = MYSQL_GUARD_EXPR.slice('(case when (`package_id` is null) then '.length, -' end)'.length);
+    expect(hashShadowDigestSql(['metadata_type', 'name'])).toBe('UNHEX(SHA2(CONCAT(`metadata_type`, 0x1f, `name`), 256))');
+    expect(hashShadowDigestSql(['metadata_type', 'name']).toLowerCase().replace(/\s/g, '')).toBe(stored);
+  });
+
+  it('counts as the widening arm\'s guard: the old two-part UNIQUE is one SAFE replace, and the guard draws no entry', () => {
+    const entries = diff([plain(OLD, ['metadata_type', 'name']), plain(NEW, ['metadata_type', 'package_id', 'name']), mysqlGuard()]);
+    expect(entries.map((e) => [e.op.type, e.category])).toEqual([['replace_unique_index', 'safe']]);
+    expect(entries[0].op).toMatchObject({ dropIndexNames: [OLD], createIndexName: NEW });
+  });
+
+  // Strict: only the platform's own expression is the guard. Each of these is
+  // an operator's functional index, and the old key stays KEPT beside it.
+  const notTheGuard: Array<[string, string]> = [
+    ['another function', 'lower(`name`)'],
+    ['the digest over other columns', '(case when (`package_id` is null) then unhex(sha2(concat(`name`,0x1f,`metadata_type`),256)) end)'],
+    ['the digest over one more column', '(case when (`package_id` is null) then unhex(sha2(concat(`id`,0x1f,`metadata_type`,0x1f,`name`),256)) end)'],
+    ['another hash width', '(case when (`package_id` is null) then unhex(sha2(concat(`metadata_type`,0x1f,`name`),512)) end)'],
+    ['another hash function', '(case when (`package_id` is null) then unhex(md5(concat(`metadata_type`,0x1f,`name`))) end)'],
+    ['another separator', '(case when (`package_id` is null) then unhex(sha2(concat(`metadata_type`,0x1e,`name`),256)) end)'],
+    ['no hex decoding', '(case when (`package_id` is null) then sha2(concat(`metadata_type`,0x1f,`name`),256) end)'],
+    ['the opposite scope', '(case when (`package_id` is not null) then unhex(sha2(concat(`metadata_type`,0x1f,`name`),256)) end)'],
+    ['an ELSE that hashes the packaged rows too', '(case when (`package_id` is null) then unhex(sha2(concat(`metadata_type`,0x1f,`name`),256)) else 0x00 end)'],
+    ['a NULL-safe key part', "(case when (`package_id` is null) then unhex(sha2(concat(coalesce(`metadata_type`,_utf8mb4'__global__'),0x1f,`name`),256)) end)"],
+    ['a scope that is a key column', '(case when (`name` is null) then unhex(sha2(concat(`metadata_type`,0x1f,`name`),256)) end)'],
+    ['a scope that is not the gained column', '(case when (`active` is null) then unhex(sha2(concat(`metadata_type`,0x1f,`name`),256)) end)'],
+  ];
+  for (const [what, expression] of notTheGuard) {
+    it(`${what} is no guard: the old index stays KEPT`, () => {
+      const physical = [plain(OLD, ['metadata_type', 'name']), plain(NEW, ['metadata_type', 'package_id', 'name']), mysqlGuard(expression)];
+      expect(diff(physical).some((e) => e.op.type === 'replace_unique_index')).toBe(false);
+      expect(legacyUniqueReplacements({
+        table: LEDGER, fields: {}, tenantField: null, physicalColumns: ledgerColumns, declaredIndexes: ledgerIndexes, physical,
+      })).toEqual([expect.objectContaining({ legacyNames: [OLD], kept: true })]);
+    });
+  }
+
+  it('the expression as a second key part, beside a column, is no guard', () => {
+    const mixed: PhysicalIndex = { ...mysqlGuard(), columns: ['active'] };
+    expect(diff([plain(OLD, ['metadata_type', 'name']), plain(NEW, ['metadata_type', 'package_id', 'name']), mixed])
+      .some((e) => e.op.type === 'replace_unique_index')).toBe(false);
+  });
+
+  it('a non-unique index over the same expression is no guard', () => {
+    const nonUnique: PhysicalIndex = { ...mysqlGuard(), unique: false };
+    expect(diff([plain(OLD, ['metadata_type', 'name']), plain(NEW, ['metadata_type', 'package_id', 'name']), nonUnique])
+      .some((e) => e.op.type === 'replace_unique_index')).toBe(false);
+  });
+
+  it('with TWO nullable gained columns no single-scope guard stands for the narrower key: KEPT', () => {
+    // A row NULL in the gained column the guard does not test escapes both keys.
+    const twoGained = [{ fields: ['metadata_type', 'package_id', 'active', 'name'], unique: 'global' as const }];
+    const physical = [plain(OLD, ['metadata_type', 'name']), mysqlGuard()];
+    expect(legacyUniqueReplacements({
+      table: LEDGER, fields: {}, tenantField: null, physicalColumns: ledgerColumns, declaredIndexes: twoGained, physical,
+    })).toEqual([expect.objectContaining({ legacyNames: [OLD], kept: true })]);
+  });
+});
+
+declareDialectCell(MYSQL_CELL, 'activation ledger package-less guard on MySQL 8 (functional key part)', (cell) => {
+  describe('an upgraded MySQL 8 database: the old key retires safely beside the functional guard', () => {
+    let driver: SqlDriver | undefined;
+    afterEach(async () => {
+      await (driver as any)?.knex.raw(`DROP TABLE IF EXISTS ${LEDGER}`).catch(() => {});
+      await driver?.disconnect();
+      driver = undefined;
+    });
+
+    const ledger = (indexes: any[]) => [{
+      name: LEDGER,
+      systemFields: { tenant: false },
+      fields: {
+        metadata_type: { type: 'text', required: true, maxLength: 100 },
+        name: { type: 'text', required: true, maxLength: 255 },
+        package_id: { type: 'text', maxLength: 255 },
+        active: { type: 'boolean' },
+      },
+      indexes,
+    }];
+
+    it('plan = one safe replace; apply; re-plan empty; two packages admitted, a second package-less row refused', async (ctx) => {
+      driver = new SqlDriver(cell.config());
+      (driver as any).logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+      const k = (driver as any).knex;
+      const [[version]] = await k.raw('SELECT VERSION() AS v');
+      // MariaDB has no functional key part; its row-scoped shadow is measured above.
+      if (/mariadb/i.test(String(version?.v))) ctx.skip();
+      await k.raw(`DROP TABLE IF EXISTS ${LEDGER}`);
+
+      await driver.initObjects(ledger([{ fields: ['metadata_type', 'name'], unique: 'global' }]) as any);
+      await driver.initObjects(ledger(ledgerIndexes) as any);
+      // The statement `metadata-protocol` runs on MySQL
+      // (`buildActivationLedgerPackagelessIndexSql('mysql2')`), verbatim.
+      await k.raw(
+        `CREATE UNIQUE INDEX ${GUARD_NAME} ON ${LEDGER} ` +
+          '((CASE WHEN package_id IS NULL THEN unhex(sha2(concat(metadata_type, 0x1f, name), 256)) END))',
+      );
+      // What the server stored is what the pure pins above read.
+      const [stored] = await k.raw(
+        'SELECT EXPRESSION AS e FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?',
+        [LEDGER, GUARD_NAME],
+      );
+      expect(stored.map((r: any) => r.e)).toEqual([MYSQL_GUARD_EXPR]);
+
+      const plan = (await driver.detectManagedDrift()).filter((e) => e.table === LEDGER);
+      expect(plan.map((e) => [e.op.type, e.category])).toEqual([['replace_unique_index', 'safe']]);
+      expect(plan[0].op).toMatchObject({ dropIndexNames: [OLD], createIndexName: NEW });
+
+      const { applied, skipped } = await driver.applyMigrationEntries(plan);
+      expect([applied.length, skipped]).toEqual([1, []]);
+      expect((await driver.detectManagedDrift()).filter((e) => e.table === LEDGER)).toEqual([]);
+
+      const [stats] = await k.raw(
+        'SELECT DISTINCT INDEX_NAME AS n FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+        [LEDGER],
+      );
+      expect(stats.map((r: any) => r.n).sort()).toEqual(['PRIMARY', DEFAULT_ORDER, NEW, GUARD_NAME].sort());
+
+      await driver.create(LEDGER, { id: 'a', metadata_type: 'flow', name: 'x', active: false });
+      // A second row naming no package: refused by the guard.
+      await expect(driver.create(LEDGER, { id: 'b', metadata_type: 'flow', name: 'x', active: true }))
+        .rejects.toMatchObject({ code: 'ER_DUP_ENTRY', message: expect.stringContaining(GUARD_NAME) });
+      await driver.create(LEDGER, { id: 'c', metadata_type: 'flow', name: 'x', package_id: 'com.acme.alpha', active: false });
+      await driver.create(LEDGER, { id: 'd', metadata_type: 'flow', name: 'x', package_id: 'com.acme.beta', active: false });
+      await expect(
+        driver.create(LEDGER, { id: 'e', metadata_type: 'flow', name: 'x', package_id: 'com.acme.alpha', active: true }),
+      ).rejects.toMatchObject({ code: 'ER_DUP_ENTRY', message: expect.stringContaining(NEW) });
+
+      // A second boot of this release leaves everything as it is.
+      await driver.initObjects(ledger(ledgerIndexes) as any);
+      expect((await driver.detectManagedDrift()).filter((e) => e.table === LEDGER)).toEqual([]);
+    });
+  });
+});
+
 declareDialectCell(MYSQL_CELL, 'activation ledger package-less guard on MariaDB (row-scoped shadow)', (cell) => {
   describe('an upgraded MariaDB database: the old key retires safely, and the guard never shows', () => {
     let driver: SqlDriver | undefined;
@@ -353,7 +519,7 @@ declareDialectCell(MYSQL_CELL, 'activation ledger package-less guard on MariaDB 
         'SELECT DISTINCT INDEX_NAME AS n FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
         [LEDGER],
       );
-      expect(stats.map((r: any) => r.n).sort()).toEqual(['PRIMARY', NEW, GUARD_NAME].sort());
+      expect(stats.map((r: any) => r.n).sort()).toEqual(['PRIMARY', DEFAULT_ORDER, NEW, GUARD_NAME].sort());
 
       await driver.create(LEDGER, { id: 'a', metadata_type: 'flow', name: 'x', active: false });
       // A second row naming no package: refused by the guard.

@@ -126,6 +126,7 @@ import {
     evaluateCondition,
     seedDeclaredVariables,
     seedRunVariables,
+    startConditionHolds,
     executeWithoutRetry,
     type runUserOf,
 } from './dag-traversal.js';
@@ -237,7 +238,10 @@ import { packageScopedRefusalMessage, PackageScopedNameRefusedError } from '@obj
 import { ENVIRONMENT_ADDRESS_SEGMENT } from '@objectstack/spec/kernel';
 import { FlowSlotTable, flowRunKey, flowRunPackage, isSlotKeySpelling, qualifiedFlowKey, unfiledFlowKey, stampFlowRunSlot, type FlowKeyMove, type FlowSlot } from './flow-slots.js';
 import { flowSlotRunStore } from './flow-slot-run-store.js';
+import { ConnectorInstances } from './connector-instances.js';
+import type { ConnectorInstanceOptions } from './plugin-extension-api.js';
 import { describeRegionSuspendingCall, regionSuspendingCall } from './subflow-region-guard.js';
+import { describeSubflowRetriedCallout, subflowRetriedCallout } from './subflow-retry-guard.js';
 // [#25222] The consumed-suspension restore's bodies: journaling a consumed
 // suspension, resolving its witnesses, and restoring, peeking at or inspecting
 // one. Each `AutomationEngine` method of the same name calls its body.
@@ -1291,6 +1295,13 @@ export interface ExecutionLogEntry {
     startedAt: string;
     completedAt?: string;
     durationMs?: number;
+    /**
+     * [#32284] `ExecutionLogSchema.waitMs`: the part of `durationMs` the run
+     * spent suspended, summed over every pause it has left — `0` on a run
+     * that never paused, absent when not recorded. Written beside `durationMs`
+     * at every site that writes one; never derived from it here.
+     */
+    waitMs?: number;
     trigger: { type: string; userId?: string; object?: string; recordId?: string };
     // ↑ built by `buildRunTrigger` at EVERY site — see its doc comment for why
     // that is a chokepoint rather than eight object literals.
@@ -1773,9 +1784,50 @@ export interface SuspendedRun {
     context: AutomationContext;
     startedAt: string;
     startTime: number;
+    /**
+     * [#32284] The run's wait clock: the milliseconds it had spent EXECUTING
+     * (its age at this pause minus every earlier pause) when it paused here.
+     * Nothing executes while the run is parked, so at any later instant the
+     * run's total wait is its age minus this — which is how one number sums
+     * every pause of a run that suspends, resumes and suspends again
+     * ({@link waitOfPausedRun}), and why a restore that re-arms a consumed
+     * pause needs no clock of its own: the snapshot carries this value, and
+     * the time from the pause to the restore is wait like the rest of it.
+     *
+     * Set at every site that builds a suspension ({@link activeMsAtPause});
+     * carried unchanged by every re-save of the SAME pause (`{ ...run }`).
+     * Absent on a suspension recorded before this field existed, or by a
+     * host store that does not round-trip it: such a run's `waitMs` is not
+     * recorded rather than guessed.
+     */
+    activeMs?: number;
     correlation?: string;
     /** Screen the run paused on (screen-flow runtime), for re-fetch + UI render. */
     screen?: ScreenSpec;
+}
+
+/**
+ * [#32284] The `activeMs` a suspension records: the run's age at the pause
+ * minus the wait it has already accumulated. `undefined` when that wait is not
+ * known (the run's previous pause carried no clock), so an unknown wait is
+ * never turned into a precise-looking number further on.
+ */
+export function activeMsAtPause(elapsedMs: number, waitMs: number | undefined): number | undefined {
+    return waitMs === undefined ? undefined : Math.max(0, elapsedMs - waitMs);
+}
+
+/**
+ * [#32284] A paused run's total wait at the moment its pause ENDS — a resume
+ * consumes it, or the run is cancelled, failed or settled where it waits, or a
+ * restore records it paused again: its age then (`elapsedMs`, measured from
+ * `startTime` like `durationMs`) minus the time it had spent executing when it
+ * paused. `undefined` for a suspension with no clock ({@link SuspendedRun.activeMs}).
+ *
+ * Clamped at zero: `startTime` may have been stamped by another replica's
+ * clock, and a published `waitMs` is never negative.
+ */
+export function waitOfPausedRun(run: Pick<SuspendedRun, 'activeMs'>, elapsedMs: number): number | undefined {
+    return typeof run.activeMs === 'number' ? Math.max(0, elapsedMs - run.activeMs) : undefined;
 }
 
 /**
@@ -1865,6 +1917,13 @@ export interface RunRecord {
     /** When the run reached its terminal state. */
     finishedAt?: string;
     durationMs?: number;
+    /**
+     * [#32284] The run's {@link ExecutionLogEntry.waitMs}, persisted beside
+     * `durationMs` (`sys_automation_run.wait_ms`) so a run read back after a
+     * restart or a ring eviction still says how much of its duration was
+     * waiting. Absent on a row written before the column existed.
+     */
+    waitMs?: number;
     /** Failure reason for a `failed` run — what a designer needs to fix it. */
     error?: string;
     /**
@@ -2681,11 +2740,18 @@ export type PackagedFlowSource = (name: string, packageId?: string) => string | 
  * [#32183] It judges the served holders: a disabled package holds no name.
  * `options.includeDisabledPackages` asks it over every holder instead, the
  * question a durable judgment asks ({@link AutomationEngine.durableFlowHolder}).
+ *
+ * [ADR-0150 D3, #33386] `options.servedCaller` asks the run's question: the
+ * served holders, and a caller whose OWN holding answers is answered only
+ * while its package is served. The served holder read keeps a disabled
+ * caller's own holding (so the activation ledger's `stillHolds` still finds
+ * it); a run of that caller gets no flow from it, and never a closure
+ * holder's (seat ruling 6884403301, amendment 4): `not-found`.
  */
 export type FlowNameResolver = (
     name: string,
     callerPackageId: string | null,
-    options?: { readonly includeDisabledPackages?: boolean },
+    options?: { readonly includeDisabledPackages?: boolean; readonly servedCaller?: boolean },
 ) => PackageScopedResolution | undefined;
 
 /**
@@ -2697,6 +2763,18 @@ export type FlowNameResolver = (
  * means the host serves no registry to ask. ⛔ Never a second implementation
  * of the rule. [#32183] `options` as {@link FlowNameResolver}'s.
  */
+/**
+ * [#31699] The answer of {@link AutomationEngine.resolveConnectorInstanceFor}:
+ * the registered instance a name addresses (its package, `null` for none), a
+ * refusal naming every candidate, or `none` (not registered, none registered
+ * under the holder the name resolves to, or two instances and nothing to
+ * choose by).
+ */
+export type ConnectorInstanceResolution =
+    | { readonly status: 'instance'; readonly packageId: string | null }
+    | { readonly status: 'refused'; readonly refusal: PackageScopedRefusal }
+    | { readonly status: 'none' };
+
 export type ConnectorNameResolver = (
     name: string,
     callerPackageId: string | null,
@@ -2861,10 +2939,24 @@ export class AutomationEngine implements IAutomationService {
      */
     // [#32183, R4-G] `heldByMany` reads every holder, a disabled package's
     // included: a disable keeps that package's slot armed, so it never folds
-    // a shared name back to one bare entry (`main`'s answer).
-    private readonly flowSlots = new FlowSlotTable((name) => this.durableFlowHolder(name)?.status === 'refused');
+    // a shared name back to one bare entry (`main`'s answer). [#33893;
+    // amendment 7] `coHeldByDisabled`: so is the key of a holder whose
+    // co-holders are disabled, which the boot pull files alone and a disabled
+    // co-holder's withdrawal leaves alone; it keeps its qualified key until the
+    // registry no longer holds the name twice ({@link placeFlowSlot} folds it).
+    private readonly flowSlots = new FlowSlotTable(
+        (name) => this.durableFlowHolder(name)?.status === 'refused',
+        (name) => this.durableFlowHolder(name)?.status === 'refused' && this.flowHolder(name)?.status !== 'refused',
+    );
     /** [#31696] Slot keys whose trigger decline ({@link activateFlowTrigger}) has been said. */
     private readonly sharedSlotTriggerWarned = new Set<string>();
+    /**
+     * [ADR-0150 D3, #33748] The slots (`PACKAGE/NAME`) whose trigger fired
+     * while their package was disabled, and whose skipped dispatch has been
+     * said ({@link triggerRun}). A slot leaves the set when it dispatches
+     * again, so the next disable is said again.
+     */
+    private readonly disabledHolderDispatchSaid = new Set<string>();
     /**
      * [#31696] Where each key a slot change moved off went, for a run still
      * in flight under its start key ({@link flowKeyNow}). A key moved onto
@@ -3166,8 +3258,22 @@ export class AutomationEngine implements IAutomationService {
      * {@link withdrawFlow}.
      */
     private readonly subflowRegionDeclinedFlows = new Map<string, string>();
-    /** Connectors registered by integration plugins, keyed by connector name (ADR-0018 §Addendum). */
-    private connectors = new Map<string, RegisteredConnector>();
+    /**
+     * Flows {@link activateFlowTrigger} declined to arm because they run after
+     * a record change and a `subflow` / `map` node of theirs reaches an inline
+     * outbound call that is retried, each with the reason `/_status` and the
+     * binding audit read. A record for {@link subflowRegionDeclinedFlows}'s
+     * reasons, kept the same way: deleted the moment the flow gets past the
+     * gate, re-asked by {@link rejudgeSubflowCallers}, dropped by
+     * {@link withdrawFlow}.
+     */
+    private readonly subflowRetryDeclinedFlows = new Map<string, string>();
+    /**
+     * Registered connector instances (ADR-0018 §Addendum), by package and name
+     * ([#31699] ADR-0150 D4: a plugin's connector, or an instance the
+     * environment authored, is of no package).
+     */
+    private connectors = new ConnectorInstances();
     /** Connector provider factories keyed by provider name (ADR-0097 §2 — `openapi`/`mcp`/`rest`/…). */
     private connectorProviders = new Map<string, ConnectorProviderFactory>();
     /** ADR-0143 D4 — provider keys registered with `credentialHandle: true`. */
@@ -4101,7 +4207,14 @@ export class AutomationEngine implements IAutomationService {
         // holds under two packages (the other's body refused, M1) still holds
         // the bare key, which would read as the name's one holder: it is not
         // armed, behind this warning, and runs when called by its package.
-        if (this.loneSharedFlowKey(this.flowSlotName(flowName)) === flowName) {
+        // [#33893] Both served ({@link loneSharedFlowKey}): beside a disabled
+        // co-holder the slot is the name's one served holder, filed under its
+        // qualified key, and is armed; the warning names no refused body.
+        // Filed under its qualified key, it is declined only once another
+        // package's body of the name was refused (recorded): a co-holder the
+        // re-sync has not registered yet is no refusal.
+        const slotName = this.flowSlotName(flowName);
+        if (this.loneSharedFlowKey(slotName) === flowName && (flowName === slotName || this.flowRefusals.has(slotName))) {
             if (!this.sharedSlotTriggerWarned.has(flowName)) {
                 this.sharedSlotTriggerWarned.add(flowName);
                 this.logger.warn(
@@ -4221,6 +4334,14 @@ export class AutomationEngine implements IAutomationService {
         // records in the same order, so a record an earlier half's decline
         // left unasked is never the one reported.
         if (this.declineOntoRegionSuspendingCall(flowName, resolved.triggerType)) return;
+        // The subflow-retry half, a decline for the same reasons: an
+        // after-record-change run waits for its `subflow` / `map` children, so
+        // an inline outbound call a child retries holds the save through the
+        // backoff ladder (ruling 6810500711, letter D). The after-save judge
+        // refuses that shape in the flow's own graph at registration; it cannot
+        // see the child, which may register after this flow. Last, and
+        // {@link describeUnboundReason} reads its record last.
+        if (this.declineOntoSubflowRetriedCallout(flowName, resolved.triggerType)) return;
         const trigger = this.triggers.get(resolved.triggerType);
         if (!trigger) return;
         try {
@@ -4314,15 +4435,49 @@ export class AutomationEngine implements IAutomationService {
      * released (an event the trigger took before the release landed) fires
      * nothing (`undefined`): the binding under its new key fires it once. A
      * slot of an unshared name runs through {@link execute}, as before.
+     *
+     * [ADR-0150 D3, #33748; seat ruling 6884403301, amendment 3] A slot whose
+     * package is disabled is not dispatched: no flow, no run, never another
+     * slot's. Asked when the trigger fires, not when it was armed: a runtime
+     * disable leaves the slot armed (a disable is reversible and moves no key,
+     * amendment 7), so the slot dispatches again the moment its package is
+     * enabled, with no re-arm. [#33905] The same for the slot of a name one
+     * package holds (ADR-0150 D3: a disabled package holds no name), which the
+     * re-sync of the disable withdraws on the normal path; a package-less slot
+     * is no package's, and runs as before.
      */
     private triggerRun(armedKey: string): (ctx: AutomationContext) => Promise<AutomationResult | undefined> {
         const slot = this.flowSlots.slot(armedKey);
         return async (ctx) => {
-            const key = slot ? this.flowSlots.keyOf(slot.name, slot.packageId) : armedKey;
+            let key = slot ? this.flowSlots.keyOf(slot.name, slot.packageId) : armedKey;
             if (key === undefined && !isSlotKeySpelling(armedKey)) return this.execute(armedKey, ctx);
             if (key === undefined || (key !== armedKey && !this.boundFlowTriggers.has(armedKey))) {
                 this.logger.debug(`Trigger fired flow '${armedKey}' after it moved or left and was released: not run.`);
                 return undefined;
+            }
+            // [#33893] A lone slot left under its qualified key (its disabled
+            // co-holder since uninstalled) folds back here, and this run goes
+            // to where it lands.
+            if (slot && this.settleFlowName(slot.name)) key = this.flowKeyNow(key);
+            if (slot && slot.packageId !== null) {
+                const said = qualifiedFlowKey(slot.packageId, slot.name);
+                if (this.isDisabledHolderSlot(slot.name, slot.packageId)) {
+                    // Said once per slot while its package stays disabled, at
+                    // `info`: the skip IS the package switch working, and
+                    // nothing that claims to be persisted is lost.
+                    if (!this.disabledHolderDispatchSaid.has(said)) {
+                        this.disabledHolderDispatchSaid.add(said);
+                        this.logger.info(
+                            `Trigger fired flow '${slot.name}' of package '${slot.packageId}', which is disabled — `
+                                + 'the flow was not run, no other package\'s flow of the name was run in its place, '
+                                + 'and no run-history row records it. It runs on its trigger again once the package '
+                                + 'is enabled.',
+                            { flow: slot.name, package: slot.packageId, slot: key },
+                        );
+                    }
+                    return undefined;
+                }
+                this.disabledHolderDispatchSaid.delete(said);
             }
             if (!slot || !this.flowSlots.isShared(slot.name)) return this.execute(key, ctx);
             // A trigger seeds `params.flowName` with the key it was armed
@@ -4385,6 +4540,7 @@ export class AutomationEngine implements IAutomationService {
         def: Connector,
         handlers: Record<string, ConnectorActionHandler>,
         origin: ConnectorOrigin = 'plugin',
+        instance?: ConnectorInstanceOptions,
     ): void {
         // The body lives in ./plugin-extension-api.ts (#25222).
         const host: ThisParameterType<typeof registerConnector> = {
@@ -4392,7 +4548,7 @@ export class AutomationEngine implements IAutomationService {
             connectors: this.connectors,
             logger: this.logger,
         };
-        registerConnector.call(host, def, handlers, origin);
+        registerConnector.call(host, def, handlers, origin, instance);
     }
 
     /**
@@ -4462,6 +4618,7 @@ export class AutomationEngine implements IAutomationService {
         origin: ConnectorOrigin = 'declarative',
         cause?: unknown,
         hold?: ConnectorHold,
+        instance?: ConnectorInstanceOptions,
     ): void {
         // The body lives in ./plugin-extension-api.ts (#25222).
         const host: ThisParameterType<typeof registerDegradedConnector> = {
@@ -4469,36 +4626,60 @@ export class AutomationEngine implements IAutomationService {
             connectors: this.connectors,
             logger: this.logger,
         };
-        registerDegradedConnector.call(host, def, reason, origin, cause, hold);
+        registerDegradedConnector.call(host, def, reason, origin, cause, hold, instance);
     }
 
     /** Enforce the ADR-0097 §4 two-sources-of-truth rule; warn on same-origin replace. */
-    private assertSameOriginOrFree(name: string, origin: ConnectorOrigin): void {
+    private assertSameOriginOrFree(name: string, origin: ConnectorOrigin, packageId?: string | null, soleOfName?: boolean): void {
         // The body lives in ./plugin-extension-api.ts (#25222).
         const host: ThisParameterType<typeof assertSameOriginOrFree> = {
             connectors: this.connectors,
             logger: this.logger,
         };
-        assertSameOriginOrFree.call(host, name, origin);
+        assertSameOriginOrFree.call(host, name, origin, packageId ?? null, soleOfName ?? false);
     }
 
-    /** Unregister a connector (hot-unplug). */
-    unregisterConnector(name: string): void {
+    /**
+     * Unregister a connector (hot-unplug): [#31699] the instance of
+     * `packageId`, or every instance of `name` when `packageId` is absent.
+     */
+    unregisterConnector(name: string, packageId?: string | null): void {
         // The body lives in ./plugin-extension-api.ts (#25222).
         const host: ThisParameterType<typeof unregisterConnector> = {
             connectors: this.connectors,
             logger: this.logger,
         };
-        unregisterConnector.call(host, name);
+        unregisterConnector.call(host, name, packageId);
+    }
+
+    /**
+     * [#31699] The registered instance `packageId` addresses: exactly that
+     * package's instance of `name` (`null`: the one of no package), or, with
+     * `packageId` absent, the one instance of the name, `undefined` when there
+     * are two (never one of them, ADR-0150 red line 2).
+     */
+    private connectorInstance(name: string, packageId?: string | null): RegisteredConnector | undefined {
+        return packageId === undefined ? this.connectors.sole(name)?.registered : this.connectors.get(name, packageId);
     }
 
     /**
      * Resolve the handler for a connector action, used by the baseline
      * `connector_action` node. Returns `undefined` when the connector or action
      * is not registered, so the node can fail the step with a clear error.
+     * [#31699] `packageId` addresses the instance ({@link connectorInstance}).
      */
-    resolveConnectorAction(connectorId: string, actionId: string): ConnectorActionHandler | undefined {
-        return this.connectors.get(connectorId)?.handlers[actionId];
+    resolveConnectorAction(connectorId: string, actionId: string, packageId?: string | null): ConnectorActionHandler | undefined {
+        return this.connectorInstance(connectorId, packageId)?.handlers[actionId];
+    }
+
+    /**
+     * [#31699] The declared `inputSchema` of an action of the instance
+     * `packageId` addresses ({@link connectorInstance}), read from its stored
+     * def as {@link getConnectorDescriptors} projects it; `undefined` when it
+     * declares none or is not registered.
+     */
+    resolveConnectorActionInputSchema(connectorId: string, actionId: string, packageId?: string | null): unknown {
+        return this.connectorInstance(connectorId, packageId)?.def.actions?.find((a) => a.key === actionId)?.inputSchema;
     }
 
     /**
@@ -4514,8 +4695,8 @@ export class AutomationEngine implements IAutomationService {
      * ADR-0097 declarative materialization path store their def here, so one
      * lookup covers both origins.
      */
-    resolveConnectorActionEffect(connectorId: string, actionId: string): ConnectorActionEffect | undefined {
-        return this.connectors.get(connectorId)?.def.actions?.find((a) => a.key === actionId)?.effect;
+    resolveConnectorActionEffect(connectorId: string, actionId: string, packageId?: string | null): ConnectorActionEffect | undefined {
+        return this.connectorInstance(connectorId, packageId)?.def.actions?.find((a) => a.key === actionId)?.effect;
     }
 
     /**
@@ -4609,12 +4790,16 @@ export class AutomationEngine implements IAutomationService {
 
     /** Get all registered connector names. */
     getRegisteredConnectors(): string[] {
-        return [...this.connectors.keys()];
+        return this.connectors.names();
     }
 
-    /** The origin a connector was registered under, or `undefined` if unregistered. */
-    getConnectorOrigin(name: string): ConnectorOrigin | undefined {
-        return this.connectors.get(name)?.origin;
+    /**
+     * The origin a connector was registered under, or `undefined` if
+     * unregistered. [#31699] `packageId` addresses the instance
+     * ({@link connectorInstance}).
+     */
+    getConnectorOrigin(name: string, packageId?: string | null): ConnectorOrigin | undefined {
+        return this.connectorInstance(name, packageId)?.origin;
     }
 
     /**
@@ -4623,8 +4808,8 @@ export class AutomationEngine implements IAutomationService {
      * `connector_action` node distinguish "degraded, retrying" from "no such
      * connector/action" in its failure message (#3017).
      */
-    getConnectorDegradedReason(name: string): string | undefined {
-        const reg = this.connectors.get(name);
+    getConnectorDegradedReason(name: string, packageId?: string | null): string | undefined {
+        const reg = this.connectorInstance(name, packageId);
         return reg?.state === 'degraded' ? (reg.degradedReason ?? 'upstream unavailable') : undefined;
     }
 
@@ -4634,8 +4819,8 @@ export class AutomationEngine implements IAutomationService {
      * Lets the `connector_action` node say "retries automatically" only when
      * that is true.
      */
-    getConnectorDegradedHold(name: string): ConnectorHold | undefined {
-        const reg = this.connectors.get(name);
+    getConnectorDegradedHold(name: string, packageId?: string | null): ConnectorHold | undefined {
+        const reg = this.connectorInstance(name, packageId);
         return reg?.state === 'degraded' ? reg.degradedHold : undefined;
     }
 
@@ -4703,8 +4888,11 @@ export class AutomationEngine implements IAutomationService {
      * Handlers are omitted — they are runtime code, not metadata.
      */
     getConnectorDescriptors(): ConnectorDescriptor[] {
-        return [...this.connectors.values()].map(({ def, origin, state, degradedReason }) => ({
+        return this.connectors.entries().map(({ packageId, registered: { def, origin, state, degradedReason } }) => ({
             name: def.name,
+            // [ADR-0150 D9, #31699] two packages' instances of one name are two
+            // descriptors: the package tells them apart.
+            ...(packageId === null ? {} : { packageId }),
             label: def.label,
             type: def.type,
             description: def.description,
@@ -4897,7 +5085,12 @@ export class AutomationEngine implements IAutomationService {
             return keys[0] ?? this.flowSlots.add({ packageId: null, name }).key;
         }
         const own = this.flowSlots.keyOf(name, packageId);
-        if (own !== undefined) return own;
+        if (own !== undefined) {
+            // [#33893] A lone slot kept under its qualified key beside a
+            // disabled co-holder folds back once that holder is gone (the
+            // uninstall's re-sync re-registers this one).
+            return this.settleFlowName(name) ? this.flowKeyNow(own) : own;
+        }
         const packageless = this.flowSlots.keyOf(name, null);
         if (packageless !== undefined) {
             this.flowSlots.adopt(packageless, packageId);
@@ -4906,8 +5099,17 @@ export class AutomationEngine implements IAutomationService {
         const incumbents = this.flowSlots.slotsOf(name);
         const incumbent = incumbents.length === 1 ? incumbents[0].packageId : null;
         if (incumbent !== null && this.flowHoldersSealed) this.bindPackagelessActivation(name, incumbent);
+        const incumbentKey = incumbents.length === 1 ? this.flowSlots.keyOf(name, incumbent) : undefined;
         const { key, moved } = this.flowSlots.add({ packageId, name });
         this.moveFlowRecords(moved);
+        // [#33893] An incumbent already under its qualified key (filed so
+        // beside a disabled co-holder) moves no key as its co-holder returns,
+        // so the move's re-arm is done here: the M1 decline it may have taken
+        // while it was the name's one slot no longer applies.
+        if (incumbentKey !== undefined && incumbentKey !== name && moved.length === 0 && this.flows.has(incumbentKey)) {
+            this.sharedSlotTriggerWarned.delete(incumbentKey);
+            this.activateFlowTrigger(incumbentKey);
+        }
         if (incumbent !== null && !this.flowHoldersSealed) this.flowLedgerDisabled.refusePackagelessBind(name, incumbent);
         return key;
     }
@@ -5018,6 +5220,7 @@ export class AutomationEngine implements IAutomationService {
             this.subflowDeclinedFlows,
             this.subflowNoticeDeclinedFlows,
             this.subflowRegionDeclinedFlows,
+            this.subflowRetryDeclinedFlows,
         ];
         for (const { from, to } of moved) {
             for (const map of maps) {
@@ -5080,27 +5283,48 @@ export class AutomationEngine implements IAutomationService {
     /**
      * [ADR-0150 D3, #31696] The key the bare flow name `name` means for a
      * caller of package `callerPackageId` (`null`: a caller with no package),
-     * or the refusal. A name one slot holds is its own key, refused only by
-     * the resolver, as before slots. A name two slots hold resolves through
-     * the resolver to the holder it reaches; the caller's own slot, when no
-     * resolver is attached; else it is refused, naming every holder.
+     * the refusal, or `absent`. A name one slot holds is its own key, refused
+     * only by the resolver, as before slots. A name two slots hold resolves
+     * through the resolver to the holder it reaches; the caller's own slot,
+     * when no resolver is attached; else it is refused, naming every holder.
+     *
+     * [ADR-0150 D3, #33386; seat ruling 6884403301] A name two slots hold is
+     * resolved over the SERVED holders (a disabled package holds no name):
+     * one served holder is that holder's slot, two or more are refused naming
+     * the served holders only, and none is `absent` (no flow). A caller whose
+     * own holding is the disabled one is `absent`, never a closure holder's
+     * (`servedCaller`, amendment 4). The slots themselves stay keyed over every
+     * holder ({@link flowSlots}, amendment 7): a disable re-points no slot, it
+     * only moves which slot a bare name reaches. `durable` asks over every
+     * holder instead, as `main` did: the subflow guards' recorded arming
+     * verdicts ({@link flowCallKey}), which a reversible disable re-judges
+     * nowhere.
      */
-    private resolveFlowKey(name: string, callerPackageId: string | null): { key: string } | { refusal: PackageScopedRefusal } {
+    private resolveFlowKey(
+        name: string,
+        callerPackageId: string | null,
+        options?: { readonly durable?: boolean },
+    ): { key: string } | { refusal: PackageScopedRefusal } | { absent: true } {
         // [#31696] A slot key is no flow's name: it names no flow here.
         if (isSlotKeySpelling(name)) return { key: unfiledFlowKey(name) };
+        this.settleFlowName(name);
         if (!this.flowSlots.isShared(name)) {
             const refusal = this.flowNameRefusal(name, callerPackageId);
-            return refusal ? { refusal } : { key: name };
+            if (refusal) return { refusal };
+            // [#33905] Its one holder's package is disabled: no flow, as for a
+            // name two packages hold that no served holder reaches.
+            if (options?.durable !== true && this.isDisabledSoleHolder(name)) return { absent: true };
+            return { key: name };
         }
-        // [#32183, R4-G] A name two slots hold resolves over every holder, a
-        // disabled package's included: a disable keeps its slot armed and
-        // moves no caller's answer (`main`'s). The served judgment is #32670's.
-        const resolution = this.flowNameResolver?.(name, callerPackageId, { includeDisabledPackages: true });
+        const resolution = this.flowNameResolver?.(name, callerPackageId,
+            options?.durable === true ? { includeDisabledPackages: true } : { servedCaller: true });
         if (resolution?.status === 'refused') return { refusal: resolution };
         if (resolution?.status === 'resolved' && resolution.holder.kind === 'package') {
             const key = this.flowSlots.keyOf(name, resolution.holder.packageId);
             if (key !== undefined) return { key };
         }
+        // [#33386] No served holder reaches the name: no flow, never another slot.
+        if (resolution?.status === 'not-found' && options?.durable !== true) return { absent: true };
         if (resolution === undefined && callerPackageId !== null) {
             const own = this.flowSlots.keyOf(name, callerPackageId);
             if (own !== undefined) return { key: own };
@@ -5113,11 +5337,68 @@ export class AutomationEngine implements IAutomationService {
      * package, the refusal thrown (409, every holder named). `undefined` for a
      * slot-key spelling (`PACKAGE/NAME`): no flow is named so, so the door
      * answers as for a flow it does not hold ({@link getFlowSlot} takes one).
+     * The removal and history entries read it: a shared name stays refused
+     * there over every holder, served or not.
      */
     private bareFlowKey(name: string): string | undefined {
         if (isSlotKeySpelling(name)) return undefined;
+        this.settleFlowName(name);
         if (!this.flowSlots.isShared(name)) return name;
         throw new PackageScopedNameRefusedError(this.sharedFlowNameRefusal(name, null));
+    }
+
+    /**
+     * [ADR-0150 D3, #33386] The key the bare entries that READ or RUN a flow
+     * ({@link execute}'s caller-less twin, {@link getFlow}, {@link toggleFlow})
+     * serve for `name`, judged over the served holders ({@link resolveFlowKey}):
+     * a name two slots hold is its one served holder's slot, refused naming
+     * the served holders when two or more serve it, and `undefined` (no flow)
+     * when none does. Seat ruling 6884403301, amendment 9: these entries move
+     * with the doors. [#33905] A name one package holds whose package is
+     * disabled is no flow here either ({@link isDisabledSoleHolder}): the
+     * entries answer as for a flow this engine does not hold, which is the
+     * namespaced address's answer.
+     */
+    private servedBareFlowKey(name: string): string | undefined {
+        if (isSlotKeySpelling(name)) return undefined;
+        this.settleFlowName(name);
+        if (!this.flowSlots.isShared(name)) return this.isDisabledSoleHolder(name) ? undefined : name;
+        const resolved = this.resolveFlowKey(name, null);
+        if ('refusal' in resolved) throw new PackageScopedNameRefusedError(resolved.refusal);
+        return 'key' in resolved ? resolved.key : undefined;
+    }
+
+    /**
+     * [ADR-0150 D3, #33748; seat ruling 6884403301, amendment 3] Is the slot
+     * `(packageId, name)` held by a package that is disabled now? Asked of
+     * the one resolver ({@link flowNameResolver}), with that package as the
+     * caller: its own holding answers on the served read, and the run's read
+     * (`servedCaller`) answers `not-found` for it only while the package is
+     * disabled (amendment 4's caller-first rule). Both readings are needed:
+     * `not-found` alone would also cover a slot whose package the registry
+     * does not hold at all, which this question does not judge. No resolver
+     * attached: nothing is disabled here.
+     */
+    private isDisabledHolderSlot(name: string, packageId: string): boolean {
+        const resolver = this.flowNameResolver;
+        if (resolver === undefined) return false;
+        const held = resolver(name, packageId);
+        if (held?.status !== 'resolved' || held.via !== 'own') return false;
+        return resolver(name, packageId, { servedCaller: true })?.status === 'not-found';
+    }
+
+    /**
+     * [ADR-0150 D3, #33905; #28117 ruling A] Is the one slot of the unshared
+     * name `name` held by a package that is disabled now
+     * ({@link isDisabledHolderSlot})? A package-less slot, or none, is not:
+     * a flow registered straight into the engine, or the environment's own,
+     * is no package's to disable. Only the entries that read or run a flow
+     * ask it; the durable reads (slot and run keys, {@link flowDispatchHolder},
+     * credentials, history) stay judged over every holder (amendment 7).
+     */
+    private isDisabledSoleHolder(name: string): boolean {
+        const packageId = this.flowSlotPackage(name);
+        return packageId !== undefined && this.isDisabledHolderSlot(name, packageId);
     }
 
     /** [#31696] The package of the slot `key` files, or `undefined` (a package-less slot, or none). */
@@ -5136,10 +5417,28 @@ export class AutomationEngine implements IAutomationService {
         return keys.length > 0 ? keys : [name];
     }
 
-    /** [M1] The key of `name`'s one slot while the registry holds `name` under two packages, else `undefined`. */
+    /**
+     * [M1] The key of `name`'s one slot while the registry holds `name` under
+     * two packages SERVED, so another served package's body of it is not held
+     * here (refused), else `undefined`. [#33893] A co-holder that is only
+     * disabled is no M1: the slot is the name's one served holder, keeps its
+     * qualified key (amendment 7) and is armed, and no body was refused.
+     */
     private loneSharedFlowKey(name: string): string | undefined {
         const keys = this.flowSlots.keysOf(name);
-        return keys.length === 1 && this.flowSlots.isShared(name) ? keys[0] : undefined;
+        return keys.length === 1 && this.flowSlots.isShared(name) && this.flowHolder(name)?.status === 'refused' ? keys[0] : undefined;
+    }
+
+    /**
+     * [#33893] Fold `name`'s lone slot back to the bare name if it is still
+     * under its qualified key while the registry no longer holds the name
+     * twice ({@link FlowSlotTable.settle}), moving its records and trigger.
+     * True when it moved.
+     */
+    private settleFlowName(name: string): boolean {
+        const moved = this.flowSlots.settle(name);
+        this.moveFlowRecords(moved);
+        return moved.length > 0;
     }
 
     /** [#31696] Is `key` the key of a slot whose name another slot holds too? */
@@ -5391,12 +5690,16 @@ export class AutomationEngine implements IAutomationService {
             subflowDeclinedFlows: this.subflowDeclinedFlows,
             subflowNoticeDeclinedFlows: this.subflowNoticeDeclinedFlows,
             subflowRegionDeclinedFlows: this.subflowRegionDeclinedFlows,
+            subflowRetryDeclinedFlows: this.subflowRetryDeclinedFlows,
             flowRefusals: this.flowRefusals,
             logger: this.logger,
         };
         withdrawFlow.call(host, name);
         // [#31696] The slot goes with its flow; a name left with one slot
-        // files it under the bare name again.
+        // files it under the bare name again. [#33893] Not while the registry
+        // still holds the name under a disabled package (the re-sync of a
+        // disable withdraws its slot): the served holder keeps its key and
+        // its binding (amendment 7).
         this.moveFlowRecords(this.flowSlots.remove(name));
     }
 
@@ -5425,6 +5728,10 @@ export class AutomationEngine implements IAutomationService {
         };
         recordFlowRefusal.call(host, name, error);
         if (lone !== undefined) this.deactivateFlowTrigger(lone);
+        // [#33893] A lone slot under its qualified key was armed while the
+        // co-holder was not yet registered; asked again, it takes the decline
+        // and says it.
+        if (lone !== undefined && lone !== name) this.activateFlowTrigger(lone);
     }
 
     /**
@@ -5535,6 +5842,7 @@ export class AutomationEngine implements IAutomationService {
             subflowDeclinedFlows: this.subflowDeclinedFlows,
             subflowNoticeDeclinedFlows: this.subflowNoticeDeclinedFlows,
             subflowRegionDeclinedFlows: this.subflowRegionDeclinedFlows,
+            subflowRetryDeclinedFlows: this.subflowRetryDeclinedFlows,
             triggers: this.triggers,
         };
         return describeUnboundReason.call(host, name, resolved);
@@ -5599,9 +5907,15 @@ export class AutomationEngine implements IAutomationService {
         return [...this.flows.keys()].map((key) => this.flowSlotName(key));
     }
 
-    /** [#31696] Refused (409, naming both) for a name two packages hold: see {@link getFlowSlot}. */
+    /**
+     * [#31696] Refused (409, naming both) for a name two packages serve: see
+     * {@link getFlowSlot}. [#33386] Judged over the served holders
+     * ({@link servedBareFlowKey}): one served holder's flow, `null` when none.
+     * [#33905] `null` too for a name one package holds whose package is
+     * disabled.
+     */
     async getFlow(name: string): Promise<FlowParsed | null> {
-        const key = this.bareFlowKey(name);
+        const key = this.servedBareFlowKey(name);
         return key === undefined ? null : this.flows.get(key) ?? null;
     }
 
@@ -5733,6 +6047,7 @@ export class AutomationEngine implements IAutomationService {
         | { readonly status: 'unadmitted' }
         | { readonly status: 'refused'; readonly candidates: PackageScopedRefusal['candidates'] } {
         if (isSlotKeySpelling(flowName) || flowName.startsWith('\u0000')) return { status: 'unadmitted' };
+        this.settleFlowName(flowName);
         if (!this.flowSlots.isShared(flowName)) return undefined;
         if (address === undefined) return { status: 'refused', candidates: this.sharedFlowNameRefusal(flowName, null).candidates };
         const environment = address.qualifier === ENVIRONMENT_ADDRESS_SEGMENT;
@@ -5818,24 +6133,84 @@ export class AutomationEngine implements IAutomationService {
      * The name is resolved for the package that ships the calling flow
      * ({@link flowCallerPackage}: a packaged flow names it from its package; an
      * environment-authored flow, or a call outside a run, names it with no
-     * package). The engine holds ONE instance per name, materialized for the
-     * answer a caller with no package gets (the declared-connector reconcile,
-     * which already refuses a name two packages hold). So a package caller
-     * whose answer is a refusal — two holders in its closure, or holders only
-     * outside it, an environment-only instance included (ADR-0150 D3 (a)) — is
-     * refused with the resolver's own message, naming every candidate. Any
-     * other answer is the instance the engine serves: an environment item
-     * exists only for a name no package holds, so a package caller that
-     * resolves at all resolves to the one package holder the reconcile
-     * materialized. A name the registry holds nothing under (a connector a
-     * plugin registers in code), or a host with no resolver, dispatches by name
+     * package). A refusal — two holders in the caller's closure, holders only
+     * outside it, an environment-only instance included (ADR-0150 D3 (a)), or,
+     * for a caller with no package, two package holders of different
+     * namespaces (ADR-0150 D9) — is answered with the resolver's own message,
+     * naming every candidate ({@link resolveConnectorInstanceFor}). A name the
+     * registry holds nothing under (a connector a plugin registers in code), or
+     * a host with no resolver, dispatches by name
      * as before. Read-only.
      */
     connectorNameRefusal(connectorId: string, context: AutomationContext | undefined): PackageScopedRefusal | undefined {
-        const callerPackageId = this.flowCallerPackage(context);
-        if (callerPackageId === null) return undefined;
-        const meant = this.connectorNameResolver?.(connectorId, callerPackageId);
-        return meant?.status === 'refused' ? meant : undefined;
+        const resolved = this.resolveConnectorInstanceFor(connectorId, this.flowCallerPackage(context));
+        return resolved.status === 'refused' ? resolved.refusal : undefined;
+    }
+
+    /**
+     * [ADR-0150 D3/D4, #31699] Which registered instance the bare name
+     * `connectorId` means for the run of `context`'s flow
+     * ({@link resolveConnectorInstanceFor} for {@link flowCallerPackage}).
+     */
+    resolveConnectorInstance(connectorId: string, context: AutomationContext | undefined): ConnectorInstanceResolution {
+        return this.resolveConnectorInstanceFor(connectorId, this.flowCallerPackage(context));
+    }
+
+    /**
+     * [ADR-0150 D3/D4/D9, #31699] Which registered instance the bare name
+     * `connectorId` means for a caller of package `callerPackageId` (`null`:
+     * no package), over the served holders (a disabled package holds no name,
+     * #32183):
+     *
+     * - the resolver's `refused` is said with its own message, every
+     *   candidate named ({@link connectorNameRefusal});
+     * - `resolved` addresses exactly the holder's instance (`null`: the
+     *   environment's). When none is registered under that holder (a catalog
+     *   entry, whose runtime a plugin registers in code; or one the reconcile
+     *   has not reached), the instance a plugin registered in code under the
+     *   name answers, as it did before (ADR-0097 §4: a plugin connector and a
+     *   declarative instance never share a name); otherwise `none`. ⛔ Never
+     *   another package's declarative instance, nor the environment's: two
+     *   packages may each hold the name now (ADR-0150 D9), and the one other
+     *   instance is not the caller's (red line 2; the narrowing removed 3b's
+     *   fallback to the one instance of the name);
+     * - a name only disabled packages hold (served: `not-found`; every
+     *   holder: held) is answered as a resolved holder with no instance: a
+     *   disabled package's instance is not served to a caller outside it,
+     *   even before the reconcile drops it (#31699 notes 6816295828 and
+     *   6820178514). A caller of the disabled package itself is answered its
+     *   own instance, as before: the resolver keeps a caller's own holding in
+     *   its served set;
+     * - a name the registry holds nothing under (a connector a plugin
+     *   registers in code), or a host with no resolver: the one instance of
+     *   the name, as a dispatch by name answered before; two are `none`,
+     *   never one of them.
+     *
+     * Read-only.
+     */
+    resolveConnectorInstanceFor(connectorId: string, callerPackageId: string | null): ConnectorInstanceResolution {
+        const resolver = this.connectorNameResolver;
+        const meant = resolver?.(connectorId, callerPackageId);
+        if (meant?.status === 'refused') return { status: 'refused', refusal: meant };
+        if (meant?.status === 'resolved') {
+            const packageId = meant.holder.kind === 'package' ? meant.holder.packageId : null;
+            return this.connectors.get(connectorId, packageId) ? { status: 'instance', packageId } : this.codeRegisteredInstance(connectorId);
+        }
+        if (meant?.status === 'not-found'
+            && resolver?.(connectorId, callerPackageId, { includeDisabledPackages: true })?.status !== 'not-found') {
+            return this.codeRegisteredInstance(connectorId);
+        }
+        const sole = this.connectors.sole(connectorId);
+        return sole ? { status: 'instance', packageId: sole.packageId } : { status: 'none' };
+    }
+
+    /**
+     * [#31699] The instance a plugin registered in code under `connectorId`
+     * (package `null`, origin `plugin`), or `none`: what a name answers when
+     * the holder it resolves to has no instance of its own.
+     */
+    private codeRegisteredInstance(connectorId: string): ConnectorInstanceResolution {
+        return this.connectors.get(connectorId, null)?.origin === 'plugin' ? { status: 'instance', packageId: null } : { status: 'none' };
     }
 
     /**
@@ -6387,7 +6762,8 @@ export class AutomationEngine implements IAutomationService {
      * run's node reads the refusal.
      */
     private resolvedFlowCallKey(name: string, callerPackageId: string | null): string {
-        const resolved = this.resolveFlowKey(name, callerPackageId);
+        // [#33386] Over every holder: the guards record an arming verdict.
+        const resolved = this.resolveFlowKey(name, callerPackageId, { durable: true });
         return 'key' in resolved ? resolved.key : unfiledFlowKey(name);
     }
 
@@ -6772,6 +7148,50 @@ export class AutomationEngine implements IAutomationService {
     }
 
     /**
+     * The arming gate's subflow-retry half, asked by
+     * {@link activateFlowTrigger} of an enabled flow it is about to arm: does
+     * it run after a record change and reach, through a `subflow` / `map` node
+     * (top-level or in a region body), an inline outbound call that something
+     * on the call chain retries ({@link subflowRetriedCallout})? The save waits
+     * for the run and the run waits for its child, so a failing call would
+     * hold the user's save for the whole backoff ladder (ruling 6810500711,
+     * letter D). Then it is declined: recorded on
+     * {@link subflowRetryDeclinedFlows} for `/_status` and the binding audit,
+     * and said once as a `warn` naming the call node, the retried call and
+     * what retries it.
+     *
+     * ⛔ A decline, never a refusal, for the other halves' reasons: the child
+     * may register after this flow, so `registerFlow` cannot refuse it without
+     * depending on load order. The after-save judge refuses the same shape in
+     * the flow's own graph at registration, where no other flow is read.
+     *
+     * #4632 verdict: FUNCTIONAL, `warn`, as the other halves: the flow is
+     * visibly smaller than declared and `/_status` says why. Said once per
+     * decline reason.
+     *
+     * @returns `true` when the flow is declined and must not be armed.
+     */
+    private declineOntoSubflowRetriedCallout(flowName: string, triggerType: string): boolean {
+        const trap = subflowRetriedCallout(this.flows, flowName, this.flowCallKey);
+        if (!trap) {
+            this.subflowRetryDeclinedFlows.delete(flowName);
+            return false;
+        }
+        const why = describeSubflowRetriedCallout(trap);
+        const reason =
+            `not armed — ${why} It is armed once '${trap.callout.flow}' is republished without that retried ` +
+            `inline call`;
+        const previous = this.subflowRetryDeclinedFlows.get(flowName);
+        this.subflowRetryDeclinedFlows.set(flowName, reason);
+        if (previous === reason) return true;
+        this.logger.warn(
+            `Flow '${flowName}' is registered but NOT armed on trigger '${triggerType}' — ${why} It is armed the ` +
+                `moment '${trap.callout.flow}' is republished without that retried inline call.`,
+        );
+        return true;
+    }
+
+    /**
      * [#20725, ADR-0126 §7.3] `subflow` just changed state — (re)registered,
      * switched on or off, or read off the ledger at boot — so ask the arming
      * gate again for each packaged flow that calls it, where the answer can
@@ -6805,6 +7225,7 @@ export class AutomationEngine implements IAutomationService {
             subflowDeclinedFlows: this.subflowDeclinedFlows,
             subflowNoticeDeclinedFlows: this.subflowNoticeDeclinedFlows,
             subflowRegionDeclinedFlows: this.subflowRegionDeclinedFlows,
+            subflowRetryDeclinedFlows: this.subflowRetryDeclinedFlows,
             flows: this.flows,
             subflowTargets: (...a) => this.subflowTargets(...a),
             packagedSubflowCallers: (...a) => this.packagedSubflowCallers(...a),
@@ -6926,10 +7347,12 @@ export class AutomationEngine implements IAutomationService {
      */
     toggleFlow(name: string, enabled: boolean, caller?: Pick<AutomationContext, 'userId'>): Promise<void> {
         // [#31696] A name two packages hold is refused (409, naming both):
-        // {@link toggleFlowSlot} switches one package's flow.
+        // {@link toggleFlowSlot} switches one package's flow. [#33386] Over
+        // the served holders: one served holder's flow is switched, none is
+        // not found ({@link servedBareFlowKey}).
         let key: string | undefined;
         try {
-            key = this.bareFlowKey(name);
+            key = this.servedBareFlowKey(name);
         } catch (err) {
             return Promise.reject(err);
         }
@@ -7315,6 +7738,9 @@ export class AutomationEngine implements IAutomationService {
         if (isSlotKeySpelling(flowName)) return { success: false, error: `Flow '${flowName}' not found` };
         const resolved = this.resolveFlowKey(flowName, this.flowCallerPackage(context));
         if ('refusal' in resolved) return { success: false, error: resolved.refusal.message };
+        // [#33386] No served holder reaches the name: as for a flow this engine does not hold.
+        // [#33905] Nor does a disabled package's flow of a name it holds alone.
+        if ('absent' in resolved) return { success: false, error: `Flow '${flowName}' not found` };
         return this.executeKey(resolved.key, context, startTime);
     }
 
@@ -7430,20 +7856,18 @@ export class AutomationEngine implements IAutomationService {
             // trigger — owns evaluating it, so every trigger type (record-change,
             // schedule, …) and a manual `execute()` share one gate. Plain-string
             // conditions are routed through CEL so bare field references resolve.
-            const startCondition = (startNode.config as Record<string, unknown> | undefined)?.condition as
-                | string
-                | { dialect?: string; source?: string; ast?: unknown }
-                | undefined;
-            if (startCondition !== undefined && startCondition !== null && startCondition !== '') {
-                const condExpr =
-                    typeof startCondition === 'string' ? { dialect: 'cel', source: startCondition } : startCondition;
-                if (!this.evaluateCondition(condExpr, variables, runContext)) {
-                    this.logger.debug(`Flow '${flowName}' skipped: start condition not met`);
-                    // `flowLabel` rides even here, unlike `successMessage` /
-                    // `summary`: it names the flow, it claims no work done, and
-                    // this answer reaches a runner as a 200 like any other.
-                    return { success: true, output: { skipped: true, reason: 'condition_not_met' }, flowLabel: flow.label };
-                }
+            //
+            // The evaluator is shared with `executeWithoutRetry`, which re-runs
+            // this gate on every retry attempt: a condition that throws here
+            // is a fault the catch below hands to the error strategy, and
+            // under `strategy: 'retry'` each later attempt evaluates it again
+            // rather than running the nodes ungated (see `startConditionHolds`).
+            if (!startConditionHolds.call(this, startNode, variables, runContext)) {
+                this.logger.debug(`Flow '${flowName}' skipped: start condition not met`);
+                // `flowLabel` rides even here, unlike `successMessage` /
+                // `summary`: it names the flow, it claims no work done, and
+                // this answer reaches a runner as a 200 like any other.
+                return { success: true, output: { skipped: true, reason: 'condition_not_met' }, flowLabel: flow.label };
             }
 
             // Re-entrancy loop guard (see `activeRecordFlows`). Breaks the SAME
@@ -7576,6 +8000,8 @@ export class AutomationEngine implements IAutomationService {
                     startedAt,
                     completedAt: new Date().toISOString(),
                     durationMs,
+                    // [#32284] The initial execution never paused: a measured 0.
+                    waitMs: 0,
                     trigger: buildRunTrigger(context),
                     steps,
                     output,
@@ -7674,7 +8100,7 @@ export class AutomationEngine implements IAutomationService {
             if (isRefusalSignal(err)) {
                 return this.finishRefusedRun({
                     runId, flowName, flowVersion: flow.version,
-                    startedAt, durationMs: Date.now() - startTime,
+                    startedAt, durationMs: Date.now() - startTime, waitMs: 0,
                     steps, flow, variables,
                     refusalMessage: err.message, context,
                 });
@@ -7684,6 +8110,9 @@ export class AutomationEngine implements IAutomationService {
             // caller can later `resume()` it. This is NOT a failure.
             if (isSuspendSignal(err)) {
                 const durationMs = Date.now() - startTime;
+                // [#32284] The run's first pause: nothing waited yet, so all
+                // of `durationMs` was execution — the clock the resume reads.
+                const waitMs = 0;
                 // #7639 — ONE snapshot expression feeding BOTH consumers: the
                 // continuation the run will resume from, and the `paused` log
                 // entry run-detail serves. Same object, so what an operator
@@ -7702,6 +8131,7 @@ export class AutomationEngine implements IAutomationService {
                     context: runContext,
                     startedAt,
                     startTime,
+                    activeMs: activeMsAtPause(durationMs, waitMs),
                     correlation: err.correlation,
                     screen: err.screen,
                 });
@@ -7712,6 +8142,7 @@ export class AutomationEngine implements IAutomationService {
                     status: 'paused',
                     startedAt,
                     durationMs,
+                    waitMs,
                     trigger: buildRunTrigger(context),
                     steps,
                     variables: variablesSnapshot,
@@ -7776,6 +8207,7 @@ export class AutomationEngine implements IAutomationService {
                 startedAt,
                 completedAt: new Date().toISOString(),
                 durationMs,
+                waitMs: 0,
                 trigger: buildRunTrigger(context),
                 steps,
                 error: errorMessage,
@@ -9793,6 +10225,8 @@ export class AutomationEngine implements IAutomationService {
         flowVersion?: number;
         startedAt: string;
         durationMs: number;
+        /** [#32284] The run's `waitMs` — `undefined` only where it is not recorded. */
+        waitMs: number | undefined;
         steps: StepLogEntry[];
         /** Read for its `isOutput` variable declarations — see `output` below. */
         flow: FlowParsed;
@@ -11203,6 +11637,7 @@ export class AutomationEngine implements IAutomationService {
             nextRunId: (...a) => this.nextRunId(...a),
             seedRunVariables: (...a) => this.seedRunVariables(...a),
             resolveRunContext: (...a) => this.resolveRunContext(...a),
+            evaluateCondition: (...a) => this.evaluateCondition(...a),
             validateNodeInputSchemas: (...a) => this.validateNodeInputSchemas(...a),
             executeNode: (...a) => this.executeNode(...a),
             recordLog: (...a) => this.recordLog(...a),

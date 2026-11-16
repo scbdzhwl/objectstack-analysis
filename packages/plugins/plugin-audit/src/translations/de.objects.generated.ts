@@ -41,10 +41,11 @@ export const deObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "Änderung des Plattform-Admin-Status",
           action_invocation: "Aktionsaufruf",
           package_uninstall: "Paket-Deinstallation",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "Import eines nicht verwalteten Pakets",
+          credential_use: "Verwendung von Anmeldedaten",
+          scim_refused: "SCIM-Anfrage abgelehnt",
+          audit_signing_key_change: "Änderung des Audit-Signaturschlüssels",
+          dataset_query: "Dataset-Abfrage"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const deObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

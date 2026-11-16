@@ -7,14 +7,14 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Navigate, useParams } from 'react-router-dom';
+import { Navigate, useLocation, useParams } from 'react-router-dom';
 import { FileQuestion, Loader2 } from 'lucide-react';
 import { useObjectTranslation } from '@object-ui/i18n';
 import { useAdapter } from '@object-ui/app-shell';
 import { DocShell } from './DocShell';
 import BookPage, { DocRefusal } from './BookPage';
 import { useBookData } from './use-book-data';
-import { bookNamedBy, bookSlug, homeBook } from './book-nav';
+import { bookNamedBy, bookSlug, homeBook, pkgOf } from './book-nav';
 
 /** What the server says about one segment the member's lists do not answer. */
 type SegmentAnswer = { slug: string; refusal: string | null };
@@ -74,6 +74,9 @@ export default function DocsSlug() {
   const { t } = useObjectTranslation();
   const { books, docs, state } = useBookData();
   const adapter = useAdapter();
+  // A flat permalink may name a section (`…/docs/<name>#section`); the redirect
+  // to the canonical in-book URL carries that fragment, and DocPage scrolls to it.
+  const { hash } = useLocation();
 
   // Answered by the member's own lists: a book slug, a readable doc, a book NAME.
   const unanswered =
@@ -111,9 +114,13 @@ export default function DocsSlug() {
 
   // Otherwise a flat doc permalink → redirect to its canonical in-book URL.
   const base = appName ? `/apps/${appName}/docs` : '/docs';
-  const hb = slug ? homeBook(slug, books, docs) : null;
+  // Under a package container that ships this name, its own copy decides the
+  // home book: two packages may ship one doc name, and the doc read there names
+  // the container's package (objectstack#34070), so the book must be its too.
+  const ownCopy = !!appName && docs.some((d) => d.name === slug && pkgOf(d) === appName);
+  const hb = slug ? homeBook(slug, books, docs, ownCopy ? appName : undefined) : null;
   if (hb && slug && docs.some((d) => d.name === slug)) {
-    return <Navigate to={`${base}/${bookSlug(hb)}/${slug}`} replace />;
+    return <Navigate to={{ pathname: `${base}/${bookSlug(hb)}/${slug}`, hash }} replace />;
   }
 
   // A book NAME that is not its slug → the book's canonical URL (objectui#11197).
@@ -132,7 +139,7 @@ export default function DocsSlug() {
 
   // The name-prefix fallback for a name no installed doc carries (unchanged).
   if (hb && slug) {
-    return <Navigate to={`${base}/${bookSlug(hb)}/${slug}`} replace />;
+    return <Navigate to={{ pathname: `${base}/${bookSlug(hb)}/${slug}`, hash }} replace />;
   }
 
   return (

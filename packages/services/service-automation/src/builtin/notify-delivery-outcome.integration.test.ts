@@ -7,8 +7,10 @@ import {
     NotificationDispatcher,
 } from '@objectstack/service-messaging';
 import type { MessagingChannel } from '@objectstack/service-messaging';
+import { FlowRunSummarySchema } from '@objectstack/spec/automation';
 import { AutomationEngine } from '../engine.js';
 import { registerNotifyNode } from './notify-node.js';
+import { registerLoopNode } from './loop-node.js';
 
 /**
  * #7747 — the run summary an operator reads must not claim a delivery that
@@ -288,5 +290,165 @@ describe('notify step names a refused channel on its run-history row', () => {
         expect(step.warnings).toHaveLength(1);
         expect(step.warnings![0]).toContain("'push'");
         expect(step.warnings![0]).not.toContain("'inbox'");
+    });
+});
+
+/**
+ * The run's own answer names the refused channel too, not only its step.
+ *
+ * The trigger door serves the engine's result verbatim (`deps.success(result)`
+ * in the runtime's automation domain), so `run.summary` below IS the `summary`
+ * a `POST /automation/:name/trigger` caller reads. The notify row in
+ * `summary.nodes[]` used to be a plain `success` with `acted: 0` and no reason:
+ * a caller reading the summary could not tell "nothing to send" from "the only
+ * channel was refused". The row now carries the step's advisory `warnings`, in
+ * the step's own shape (a list of strings), and the run still completes: flow
+ * control is unchanged.
+ *
+ * Each case parses the summary through the spec's `FlowRunSummarySchema`, the
+ * schema a client validates the response with: an undeclared member is stripped
+ * there, so a warning the contract does not declare would not reach the caller.
+ */
+describe('the trigger response summary row of a notify step carries its refused-channel warning', () => {
+    function notifyRow(run: { summary?: unknown }) {
+        const summary = FlowRunSummarySchema.parse(run.summary);
+        const row = summary.nodes.find((n) => n.nodeId === 'notify');
+        expect(row, 'the notify node has a summary row').toBeDefined();
+        return row!;
+    }
+
+    it('durable path, the only channel unregistered: the row warns, names the channel, and equals the step warning', async () => {
+        const { engine } = bootOutboxStack([recordingChannel('inbox').channel]);
+        engine.registerFlow('nudge', notifyFlow(['push']));
+        const run = await engine.execute('nudge');
+
+        expect(run.success, 'flow control is unchanged: the run is not aborted').toBe(true);
+        const row = notifyRow(run);
+        expect(row).toMatchObject({ status: 'success', runs: 1, acted: 0 });
+        expect(row.warnings).toHaveLength(1);
+        expect(row.warnings![0]).toContain("'push'");
+        const [history] = await engine.listRuns('nudge');
+        const step = history.steps.find((s) => s.nodeId === 'notify')!;
+        expect(row.warnings, 'the row carries the step warning verbatim').toEqual(step.warnings);
+    });
+
+    it('inline path, the only channel unregistered: the same warning on the row', async () => {
+        const messaging = new MessagingService({ logger: silentLogger() });
+        messaging.registerChannel(recordingChannel('inbox').channel);
+        const engine = engineWith(messaging);
+        engine.registerFlow('nudge', notifyFlow(['push']));
+        const run = await engine.execute('nudge');
+
+        expect(run.success).toBe(true);
+        const row = notifyRow(run);
+        expect(row.warnings).toHaveLength(1);
+        expect(row.warnings![0]).toContain("'push'");
+    });
+
+    it('partial delivery: the row names only the refused channel', async () => {
+        const { engine } = bootOutboxStack([recordingChannel('inbox').channel]);
+        engine.registerFlow('nudge', notifyFlow(['inbox', 'push']));
+        const run = await engine.execute('nudge');
+
+        const row = notifyRow(run);
+        expect(row.warnings).toHaveLength(1);
+        expect(row.warnings![0]).toContain("'push'");
+        expect(row.warnings![0]).not.toContain("'inbox'");
+    });
+
+    it('CONTROL: a registered channel leaves the row with no warnings member at all', async () => {
+        const { engine } = bootOutboxStack([recordingChannel('inbox').channel]);
+        engine.registerFlow('nudge', notifyFlow(['inbox']));
+        const run = await engine.execute('nudge');
+
+        expect(run.success).toBe(true);
+        const row = notifyRow(run);
+        expect(row.status).toBe('success');
+        expect('warnings' in row, 'absent, never an empty list').toBe(false);
+    });
+});
+
+/**
+ * A `notify` in a loop whose fan-out varies per iteration raises ONE warning
+ * text per cause, so the summary row's distinct-text fold reads it as one
+ * entry. The text used to carry the per-execution delivery count, so three
+ * iterations with one, two and three recipients produced three texts for one
+ * refused channel and filled the row's capped list with near-duplicates. The
+ * counts stay on each execution's own node output (`failed`, `delivered`,
+ * `enqueued`).
+ */
+describe('a looped notify whose fan-out varies folds into one summary warning', () => {
+    function loopedNotifyFlow() {
+        return {
+            name: 'nudge',
+            label: 'Nudge',
+            type: 'autolaunched' as const,
+            variables: [{ name: 'rows', type: 'list' as const, isInput: true }],
+            nodes: [
+                { id: 'start', type: 'start' as const, label: 'Start' },
+                {
+                    id: 'each',
+                    type: 'loop' as const,
+                    label: 'For each row',
+                    config: {
+                        collection: { dialect: 'cel', source: 'rows' },
+                        iteratorVariable: 'row',
+                        body: {
+                            nodes: [{
+                                id: 'notify',
+                                type: 'notify',
+                                label: 'Notify',
+                                config: {
+                                    recipients: [{ dialect: 'cel', source: 'row' }],
+                                    title: 'Renewal due',
+                                    message: 'Ping',
+                                    channels: ['push'],
+                                },
+                            }],
+                            edges: [],
+                        },
+                    },
+                },
+                { id: 'end', type: 'end' as const, label: 'End' },
+            ],
+            edges: [
+                { id: 'e1', source: 'start', target: 'each' },
+                { id: 'e2', source: 'each', target: 'end' },
+            ],
+        };
+    }
+
+    it('three iterations with 1, 2 and 3 refused deliveries: one text on every step, one entry on the row', async () => {
+        const messaging = new MessagingService({ logger: silentLogger() });
+        messaging.registerChannel(recordingChannel('inbox').channel);
+        const engine = engineWith(messaging);
+        registerLoopNode(engine, { logger: silentLogger(), getService: () => undefined } as any);
+        // Records each emit's own failed count: the control that the fan-out
+        // really did vary from one iteration to the next.
+        const failedPerEmit: number[] = [];
+        const emit = messaging.emit.bind(messaging);
+        messaging.emit = (async (...args: Parameters<typeof emit>) => {
+            const result = await emit(...args);
+            failedPerEmit.push(result.failed);
+            return result;
+        }) as typeof messaging.emit;
+        engine.registerFlow('nudge', loopedNotifyFlow() as never);
+
+        const run = await engine.execute('nudge', {
+            params: { rows: [['user_1'], ['user_1', 'user_2'], ['user_1', 'user_2', 'user_3']] },
+        });
+        expect(run.success).toBe(true);
+
+        const [history] = await engine.listRuns('nudge');
+        const steps = history.steps.filter((s) => s.nodeId === 'notify');
+        expect(steps).toHaveLength(3);
+        expect(failedPerEmit, 'the fan-out varied: 1, 2 and 3 refused deliveries').toEqual([1, 2, 3]);
+        expect(new Set(steps.map((s) => s.warnings?.[0])).size, 'one text for one cause').toBe(1);
+
+        const summary = FlowRunSummarySchema.parse(run.summary);
+        const row = summary.nodes.find((n) => n.nodeId === 'notify')!;
+        expect(row).toMatchObject({ runs: 3, status: 'success' });
+        expect(row.warnings).toEqual([steps[0].warnings![0]]);
+        expect(row.warnings![0]).toContain("'push'");
     });
 });

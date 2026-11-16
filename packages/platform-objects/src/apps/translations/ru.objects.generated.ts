@@ -120,7 +120,8 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
         help: "Как была создана эта учётная запись — idp_provisioned (JIT через федеративный SSO) или env_native (локальная регистрация / конечный пользователь приложения). Управляется системой; не редактируйте.",
         options: {
           idp_provisioned: "Создан IdP",
-          env_native: "Локальная учётная запись"
+          env_native: "Локальная учётная запись",
+          idp_pending: "Pending SSO Sign-In"
         }
       },
       id: {
@@ -214,6 +215,54 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
             "user.phoneNumber": "Номер телефона",
             permissionSet: "Набор разрешений",
             temporaryPassword: "Временный пароль: скопируйте его сейчас — он показывается только один раз и нигде не сохраняется"
+          }
+        }
+      },
+      add_sso_user: {
+        label: "Добавить пользователя",
+        description: "Добавьте человека по адресу электронной почты до его первого входа. Он входит через поставщика удостоверений вашей организации; пароль здесь не задаётся.",
+        params: {
+          positions: {
+            label: "Должность",
+            helpText: "Необязательно. Должность, которую этот человек занимает с момента добавления."
+          },
+          permissionSets: {
+            label: "Набор разрешений",
+            helpText: "Необязательно. Выдаёт человеку этот набор разрешений, чтобы он мог открыть свои приложения при первом входе."
+          },
+          manager: {
+            label: "Почта руководителя",
+            helpText: "Необязательно. Адрес электронной почты руководителя этого человека — пользователя этой среды."
+          }
+        },
+        resultDialog: {
+          title: "Пользователь добавлен",
+          acknowledge: "Готово",
+          fields: {
+            email: "Электронная почта",
+            notApplied: "Уже ожидает входа, поэтому не применено (задайте в записи)",
+            managerError: "Руководитель",
+            "host.reason": "Приглашение не отправлено"
+          }
+        }
+      },
+      import_sso_users: {
+        label: "Импортировать пользователей",
+        description: "Добавьте сразу несколько человек из текста CSV. Каждая строка добавляется отдельно, поэтому ошибочная строка не влияет на остальные. Они входят через поставщика удостоверений вашей организации; пароль здесь не задаётся.",
+        params: {
+          csv: {
+            label: "CSV",
+            helpText: "Строка заголовка, затем по одному человеку в строке, не более 500. Столбцы: email, name, positions и permission_sets (машинные имена через ;) и manager_id (адрес электронной почты руководителя)."
+          }
+        },
+        resultDialog: {
+          title: "Импорт завершён",
+          acknowledge: "Готово",
+          fields: {
+            "summary.added": "Добавлено",
+            "summary.alreadyPending": "Уже ожидают, уведомлены повторно",
+            "summary.failed": "Не добавлено",
+            rows: "Результат по строкам"
           }
         }
       },
@@ -400,7 +449,7 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
   sys_session: {
     label: "Сеанс",
     pluralLabel: "Сеансы",
-    description: "Активные сеансы пользователей",
+    description: "Сеансы пользователей",
     fields: {
       user_id: {
         label: "Пользователь"
@@ -2167,6 +2216,18 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
             label: "URL обнаружения",
             helpText: "Необязательно. URL документа обнаружения OIDC (https). Оставьте пустым, чтобы вывести `<issuer>/.well-known/openid-configuration`. Указанной здесь конечной точке доверяют для этого поставщика."
           },
+          authorizationEndpoint: {
+            label: "Authorization URL",
+            helpText: "Optional. OIDC authorization endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names an authorization host the server does not trust."
+          },
+          tokenEndpoint: {
+            label: "Token URL",
+            helpText: "Optional. OIDC token endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a token host the server does not trust. Google: https://oauth2.googleapis.com/token"
+          },
+          jwksEndpoint: {
+            label: "JWKS URL",
+            helpText: "Optional. URL of the IdP’s signing-key set (JWKS, https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a key-set host the server does not trust. Google: https://www.googleapis.com/oauth2/v3/certs"
+          },
           userInfoEndpoint: {
             label: "URL userinfo",
             helpText: "Необязательно. URL конечной точки userinfo OIDC (https), используемый вместо указанного в документе обнаружения. Указанной здесь конечной точке доверяют для этого поставщика: укажите её, если регистрация отклонена, потому что документ обнаружения называет хост userinfo, которому сервер не доверяет."
@@ -2253,6 +2314,11 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
             label: "Сопоставление: атрибут групп",
             helpText: "Необязательно. Атрибут утверждения SAML, содержащий группы пользователя. При каждом входе выдаются наборы разрешений, сопоставленные этим группам. Оставьте пустым, чтобы не сопоставлять группы.",
             placeholder: "groups"
+          },
+          mapAccountKey: {
+            label: "Map: Account key attribute",
+            helpText: "Optional. Assertion attribute with one stable value per person that the IdP sets and the user cannot edit (Entra ID object id, Okta user id; never an email, name or other attribute a user can change), used as the account key instead of the NameID, so a sign-in from your sign-in page and one from the IdP’s app portal reach the same account, and an email change keeps it. Leave blank for the default: Microsoft Entra ID (IdP Entity ID on sts.windows.net or login.microsoftonline.com) uses http://schemas.microsoft.com/identity/claims/objectidentifier, every other IdP the NameID. Set it when the provider is registered: accounts already made keep the key they were made with.",
+            placeholder: "http://schemas.microsoft.com/identity/claims/objectidentifier"
           }
         }
       },
@@ -3565,7 +3631,7 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
         label: "Обработано строк"
       },
       created_count: {
-        label: "Создано"
+        label: "Создано записей"
       },
       updated_count: {
         label: "Обновлено"

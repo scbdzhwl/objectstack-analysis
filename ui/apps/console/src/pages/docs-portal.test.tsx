@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
 // ── Sample metadata the mocked adapter serves (two packages, no books) ──────
@@ -33,7 +33,7 @@ const { ADAPTER, WORLD } = vi.hoisted(() => {
   ];
   const CONTENT: Record<string, string> = {
     crm_intro: 'Welcome to the CRM',
-    crm_guide_lead: 'Managing leads',
+    crm_guide_lead: 'Managing leads {#lead-scoring}',
     ops_setup: 'Operations setup',
   };
   // objectui#11197 — a second world, WITH authored books, switched on only by the
@@ -66,23 +66,54 @@ const { ADAPTER, WORLD } = vi.hoisted(() => {
   ];
   const AUTHORED_CONTENT: Record<string, string> = {
     showcase_index: 'INDEX BODY',
-    showcase_lead_guide: 'LEAD BODY',
+    showcase_lead_guide: 'LEAD BODY {#lead-scoring}',
     alpha_welcome: 'ALPHA BODY',
     beta_start: 'BETA BODY',
     acme_intro: 'ACME BODY',
     ops_setup: 'OPS BODY',
   };
-  const WORLD = { authored: false };
+  // objectstack#34070 — a third world, switched on only by the "two packages
+  // ship one doc name" block: `shared_guide` is shipped by alpha AND beta (beta
+  // listed first), and a read of it that names no package is refused the way
+  // the server refuses it, `409 RESOURCE_CONFLICT` naming both holders.
+  const CONFLICT_DOCS = [
+    { name: 'shared_guide', label: 'Shared Guide', _packageId: 'com.example.beta' },
+    { name: 'beta_start', label: 'Beta Start', _packageId: 'com.example.beta' },
+    { name: 'shared_guide', label: 'Shared Guide', _packageId: 'com.example.alpha' },
+    { name: 'alpha_welcome', label: 'Alpha Welcome', _packageId: 'com.example.alpha' },
+  ];
+  const CONFLICT_CONTENT: Record<string, Record<string, string>> = {
+    'com.example.alpha': { shared_guide: 'ALPHA SHARED BODY', alpha_welcome: 'ALPHA BODY' },
+    'com.example.beta': { shared_guide: 'BETA SHARED BODY', beta_start: 'BETA BODY' },
+  };
+  /** A rejection shaped like `@objectstack/client`'s on a non-2xx response. */
+  const failure = (httpStatus: number, code: string, message: string, details?: unknown) =>
+    Object.assign(new Error(message), { httpStatus, code, details });
+  const conflictRead = (name: string, packageId: string | undefined) => {
+    if (name === 'broken_doc') throw failure(500, 'INTERNAL_ERROR', 'The metadata service is unavailable');
+    const holders = Object.keys(CONFLICT_CONTENT).filter((p) => name in CONFLICT_CONTENT[p]);
+    if (packageId) return { item: { name, content: CONFLICT_CONTENT[packageId]?.[name] } };
+    if (holders.length > 1) {
+      throw failure(409, 'RESOURCE_CONFLICT', `doc "${name}" is held by ${holders.length} packages`, {
+        candidates: holders.map((p) => ({ kind: 'package', packageId: p })),
+      });
+    }
+    return { item: { name, content: holders.length ? CONFLICT_CONTENT[holders[0]][name] : undefined } };
+  };
+  const WORLD = { authored: false, conflict: false };
   const ADAPTER = {
     getClient: () => ({
       meta: {
         getItems: async (type: string) =>
-          WORLD.authored
+          WORLD.conflict
+            ? (type === 'doc' ? CONFLICT_DOCS : []) // implicit books only
+            : WORLD.authored
             ? (type === 'doc' ? AUTHORED_DOCS : type === 'book' ? AUTHORED_BOOKS : [])
             : (type === 'doc' ? DOCS : []), // no authored books
-        getItem: async (_type: string, name: string) => ({
-          item: { name, content: (WORLD.authored ? AUTHORED_CONTENT : CONTENT)[name] },
-        }),
+        getItem: async (_type: string, name: string, options?: { packageId?: string }) =>
+          WORLD.conflict
+            ? conflictRead(name, options?.packageId)
+            : { item: { name, content: (WORLD.authored ? AUTHORED_CONTENT : CONTENT)[name] } },
       },
     }),
   };
@@ -94,13 +125,35 @@ vi.mock('@object-ui/app-shell', async (importOriginal) => ({
   useAdapter: () => ADAPTER,
 }));
 
-vi.mock('@object-ui/plugin-markdown', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  MarkdownRenderer: ({ schema }: { schema: { content?: string } }) => (
-    <div data-testid="doc-content">{schema.content}</div>
-  ),
-  extractToc: () => [],
-}));
+// A `{#id}` marker in a doc body stands for a heading with that anchor id. Like
+// the real renderer's (behind React.lazy), it mounts AFTER the body's first
+// render, and the marker is not part of the body text.
+vi.mock('@object-ui/plugin-markdown', async (importOriginal) => {
+  const { useEffect, useState } = await import('react');
+  // Explicit closing tags: check:vi-mock-inherit's masker reads a self-closing `/>` after `}` as a regex.
+  function LateHeadings({ ids }: { ids: string[] }) {
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => {
+      const timer = setTimeout(() => setMounted(true), 0);
+      return () => clearTimeout(timer);
+    }, []);
+    return mounted ? <>{ids.map((id) => <h2 key={id} id={id}></h2>)}</> : null;
+  }
+  return {
+    ...(await importOriginal<Record<string, unknown>>()),
+    MarkdownRenderer: ({ schema }: { schema: { content?: string } }) => {
+      const content = schema.content ?? '';
+      const ids = [...content.matchAll(/\{#([\w-]+)\}/g)].map((m) => m[1]);
+      return (
+        <>
+          <div data-testid="doc-content">{content.replace(/\s*\{#[\w-]+\}/g, '')}</div>
+          <LateHeadings ids={ids}></LateHeadings>
+        </>
+      );
+    },
+    extractToc: () => [],
+  };
+});
 
 vi.mock('@object-ui/i18n', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -330,5 +383,180 @@ describe('objectui#11197 — a book NAME reaches the book, and nothing that reso
       expect(await screen.findByText('Documentation not found')).toBeInTheDocument();
       expect(screen.getByTestId('where').textContent).toBe('/docs/nothing_here');
     });
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// objectstack#33055 — a flat permalink keeps its #section through the redirect
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A cross-reference to a section of another doc is written against the doc's
+ * flat permalink (`…/docs/NAME#section`). The portal redirects that permalink
+ * to the canonical in-book URL; the redirect keeps the fragment, and the reader
+ * scrolls the named heading into view once it mounts (behind the markdown
+ * renderer's lazy boundary) — the scroll an in-page anchor click gives. A URL
+ * with no fragment lands at the top.
+ */
+describe('objectstack#33055 — the #section survives the flat → canonical redirect and is scrolled to', () => {
+  function Where() {
+    const { pathname, hash } = useLocation();
+    return <div data-testid="where">{`${pathname}${hash}`}</div>;
+  }
+  function Portal({ entry }: { entry: string }) {
+    return (
+      <MemoryRouter initialEntries={[entry]}>
+        <Where />
+        <Routes>
+          <Route path="/docs" element={<DocsLayout />}>
+            <Route index element={<DocsIndex />} />
+            <Route path=":slug" element={<DocsSlug />} />
+            <Route path=":slug/:name" element={<DocPage />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+  }
+
+  /** The ids of the elements `scrollIntoView` was called on, in order. */
+  let scrolled: string[];
+  beforeEach(() => {
+    scrolled = [];
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      scrolled.push(this.id);
+    });
+  });
+  afterEach(() => {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    WORLD.authored = false;
+  });
+
+  it('a flat permalink with #section lands on the canonical URL with the fragment, scrolled to that heading', async () => {
+    render(<Portal entry="/docs/crm_guide_lead#lead-scoring" />);
+    expect(await screen.findByTestId('doc-content')).toHaveTextContent('Managing leads');
+    expect(screen.getByTestId('where').textContent).toBe('/docs/crm/crm_guide_lead#lead-scoring');
+    await waitFor(() => expect(scrolled).toEqual(['lead-scoring']));
+  });
+
+  it('CONTROL: the same flat permalink with no fragment lands at the top', async () => {
+    render(<Portal entry="/docs/crm_guide_lead" />);
+    expect(await screen.findByTestId('doc-content')).toHaveTextContent('Managing leads');
+    expect(screen.getByTestId('where').textContent).toBe('/docs/crm/crm_guide_lead');
+    await waitFor(() => expect(document.getElementById('lead-scoring')).not.toBeNull());
+    expect(scrolled).toEqual([]);
+  });
+
+  it('the canonical URL with #section, opened directly, scrolls to that heading', async () => {
+    render(<Portal entry="/docs/crm/crm_guide_lead#lead-scoring" />);
+    expect(await screen.findByTestId('doc-content')).toHaveTextContent('Managing leads');
+    await waitFor(() => expect(scrolled).toEqual(['lead-scoring']));
+  });
+
+  it('the name-prefix fallback redirect keeps the fragment too', async () => {
+    render(<Portal entry="/docs/crm_not_installed#lead-scoring" />);
+    expect(await screen.findByText('Documentation not found')).toBeInTheDocument();
+    expect(screen.getByTestId('where').textContent).toBe('/docs/crm/crm_not_installed#lead-scoring');
+  });
+
+  it('a book NAME reader segment redirects to the slug URL with the fragment, scrolled to that heading', async () => {
+    WORLD.authored = true;
+    render(<Portal entry="/docs/showcase_manual/showcase_lead_guide#lead-scoring" />);
+    expect(await screen.findByTestId('doc-content')).toHaveTextContent('LEAD BODY');
+    expect(screen.getByTestId('where').textContent).toBe('/docs/manual/showcase_lead_guide#lead-scoring');
+    await waitFor(() => expect(scrolled).toEqual(['lead-scoring']));
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// objectstack#34070 — a doc name two packages ship: the reader picks the package
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Two enabled packages may ship one doc name. A read of it that names no
+ * package is refused, `409 RESOURCE_CONFLICT`, with the holders in the
+ * refusal's `details.candidates` (ADR-0150 D3; the `/meta` 409 section of
+ * `content/docs/api/client-sdk.mdx`). The portal lists those candidates, each
+ * linking to its package address `/apps/PACKAGE/docs/NAME`, where the read names
+ * the package and the doc opens in that package's own book. One holder, and
+ * any other failure, answer as they did.
+ */
+describe('objectstack#34070 — a doc name two packages ship lists its candidate packages', () => {
+  function Where() {
+    return <div data-testid="where">{useLocation().pathname}</div>;
+  }
+  function Portal({ entry }: { entry: string }) {
+    const children = (
+      <>
+        <Route path=":slug" element={<DocsSlug />} />
+        <Route path=":slug/:name" element={<DocPage />} />
+      </>
+    );
+    return (
+      <MemoryRouter initialEntries={[entry]}>
+        <Where />
+        <Routes>
+          <Route path="/docs" element={<DocsLayout />}>
+            <Route index element={<DocsIndex />} />
+            {children}
+          </Route>
+          <Route path="/apps/:appName/docs" element={<DocsLayout />}>
+            {children}
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+  }
+  const candidateList = () => screen.findByRole('list', { name: 'Packages that provide this document' });
+
+  beforeEach(() => {
+    WORLD.conflict = true;
+  });
+  afterEach(() => {
+    WORLD.conflict = false;
+  });
+
+  it('a 409 with two candidates lists both, each linking to its package address', async () => {
+    render(<Portal entry="/docs/shared_guide" />);
+    const list = await candidateList();
+    expect(screen.getByRole('heading', { name: 'Choose a package' })).toBeInTheDocument();
+    const links = within(list).getAllByRole('link');
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([
+      '/apps/com.example.alpha/docs/shared_guide',
+      '/apps/com.example.beta/docs/shared_guide',
+    ]);
+    // The package as the portal names it (its book), with its id beside it.
+    expect(links.map((l) => l.textContent)).toEqual(['Alphacom.example.alpha', 'Betacom.example.beta']);
+    expect(screen.queryByTestId('doc-content')).toBeNull();
+    expect(screen.queryByText('Failed to load documentation')).toBeNull();
+  });
+
+  it('each candidate opens that package\'s doc, in that package\'s book', async () => {
+    render(<Portal entry="/docs/shared_guide" />);
+    fireEvent.click(within(await candidateList()).getByRole('link', { name: /com\.example\.alpha/ }));
+    expect(await screen.findByTestId('doc-content')).toHaveTextContent('ALPHA SHARED BODY');
+    // Beta is listed first by the server; the package container decides the book.
+    expect(screen.getByTestId('where').textContent).toBe('/apps/com.example.alpha/docs/com.example.alpha/shared_guide');
+    cleanup();
+
+    render(<Portal entry="/docs/shared_guide" />);
+    fireEvent.click(within(await candidateList()).getByRole('link', { name: /com\.example\.beta/ }));
+    expect(await screen.findByTestId('doc-content')).toHaveTextContent('BETA SHARED BODY');
+    expect(screen.getByTestId('where').textContent).toBe('/apps/com.example.beta/docs/com.example.beta/shared_guide');
+  });
+
+  it('CONTROL: a doc one package ships renders as today, with no candidate list', async () => {
+    render(<Portal entry="/docs/alpha_welcome" />);
+    expect(await screen.findByTestId('doc-content')).toHaveTextContent('ALPHA BODY');
+    expect(screen.getByTestId('where').textContent).toBe('/docs/com.example.alpha/alpha_welcome');
+    expect(screen.queryByRole('list', { name: 'Packages that provide this document' })).toBeNull();
+  });
+
+  it('CONTROL: a failure that is not the 409 keeps today\'s error state', async () => {
+    render(<Portal entry="/docs/com.example.alpha/broken_doc" />);
+    expect(await screen.findByText('Failed to load documentation')).toBeInTheDocument();
+    expect(screen.getByText('The metadata service is unavailable')).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Packages that provide this document' })).toBeNull();
   });
 });

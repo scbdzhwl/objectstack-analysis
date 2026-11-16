@@ -120,13 +120,14 @@ async function withLegacyColumn(): Promise<{ file: string; remote: TursoDriver; 
 describe('drop_column', () => {
   it('drops the column and every index keyed on it, keeping the rows', async () => {
     const { file, remote, drop } = await withLegacyColumn();
-    expect(Object.keys(await indexesOf(file, 't')).sort()).toEqual(['idx_t_legacy', 'idx_t_name_legacy']);
+    expect(Object.keys(await indexesOf(file, 't')).sort()).toEqual(['idx_t_created_at_id', 'idx_t_legacy', 'idx_t_name_legacy']);
 
     const { applied, skipped } = await remote.applyMigrationEntries([drop], { allowDestructive: true });
 
     expect([applied, skipped]).toEqual([[drop], []]);
     expect(await columnsOf(file, 't')).not.toContain('legacy');
-    expect(await indexesOf(file, 't')).toEqual({});
+    // [#33695] The implicit default-order index is keyed on no dropped column, so it stays.
+    expect(Object.keys(await indexesOf(file, 't'))).toEqual(['idx_t_created_at_id']);
     expect(await secondConnection(file, 'SELECT id, name FROM "t" ORDER BY id')).toEqual([
       { id: 'a', name: 'A' },
       { id: 'b', name: 'B' },
@@ -139,7 +140,7 @@ describe('drop_column', () => {
     const { file, remote, drop } = await withLegacyColumn();
     expect(await remote.applyMigrationEntries([drop])).toEqual({ applied: [], skipped: [drop] });
     expect(await columnsOf(file, 't')).toContain('legacy');
-    expect(Object.keys(await indexesOf(file, 't')).sort()).toEqual(['idx_t_legacy', 'idx_t_name_legacy']);
+    expect(Object.keys(await indexesOf(file, 't')).sort()).toEqual(['idx_t_created_at_id', 'idx_t_legacy', 'idx_t_name_legacy']);
   });
 
   it('a column SQLite refuses to drop is skipped, and the indexes dropped before it are rolled back', async () => {
@@ -190,7 +191,8 @@ describe('the index entries', () => {
     expect(drop).toBeDefined();
 
     expect(await remote.applyMigrationEntries([drop], { allowDestructive: true })).toEqual({ applied: [drop], skipped: [] });
-    expect(await indexesOf(file, 'indexed_t')).toEqual({});
+    // [#33695] Only the undeclared index goes; the implicit default-order index stays.
+    expect(Object.keys(await indexesOf(file, 'indexed_t'))).toEqual(['idx_indexed_t_created_at_id']);
     expect(await remote.applyMigrationEntries([drop], { allowDestructive: true })).toEqual({ applied: [drop], skipped: [] });
   });
 
@@ -309,6 +311,26 @@ describe('what this transport cannot perform, and convergence', () => {
     await local.connect();
     local.registerObjectMetadata([T] as Objects);
     expect(await local.detectManagedDrift([T] as Objects)).toEqual([]);
+  });
+});
+
+describe('the install\'s declared NOT NULL relax (#33724)', () => {
+  it('a declared `storage: { notNull: false }` over a NOT NULL column is skipped with the face\'s reason, and the column stays', async () => {
+    const file = nextFile();
+    const remote = await remoteOver(file);
+    const V1 = { name: 'p', fields: { price: { type: 'number', storage: { notNull: true } } } };
+    const V2 = { name: 'p', fields: { price: { type: 'number', storage: { notNull: false } } } };
+    await remote.syncSchemasBatch([{ object: 'p', schema: V1 }]);
+    const notNullOf = async () =>
+      (await secondConnection(file, `SELECT "notnull" AS nn FROM pragma_table_info('p') WHERE name = 'price'`))[0]?.nn;
+    expect(Number(await notNullOf())).toBe(1);
+    remote.registerObjectMetadata([V2] as Objects);
+
+    const report = await remote.relaxDeclaredNotNull(V2, ['price'], { packageId: 'com.acme.crm' });
+
+    expect(report.applied).toEqual([]);
+    expect(report.skipped.map((e) => `${e.op.type}:${e.column}`)).toEqual(['relax_not_null:price']);
+    expect(Number(await notNullOf())).toBe(1);
   });
 });
 

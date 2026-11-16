@@ -230,6 +230,17 @@ export const PUBLIC_AUTH_FEATURES = {
         'self-registration (break-glass link remains). No spec input to gate.',
     },
   },
+  directSignIn: {
+    surface: 'login',
+    semantics: 'opt-in',
+    exempt: {
+      reason:
+        'Login-surface only: the Console sign-in page navigates a signed-out ' +
+        'visitor straight to the identity provider through the start door. The ' +
+        'served value is refined to "able to start" (one provider resolves) at ' +
+        '/auth/config. No spec input to gate.',
+    },
+  },
   deviceAuthorization: {
     surface: 'login',
     semantics: 'opt-in',
@@ -246,8 +257,9 @@ export const PUBLIC_AUTH_FEATURES = {
     semantics: 'opt-in',
     gatedInputs: [
       'sys_user.actions.create_user',
-      'sys_user.actions.ban_user',
-      'sys_user.actions.unban_user',
+      // `ban_user` / `unban_user` are not booked: their doors are ObjectStack
+      // mounts that work without the admin plugin, so neither is gated on this
+      // flag (see the admin block header in sys-user.object.ts).
       'sys_user.actions.unlock_user',
       'sys_user.actions.set_user_password',
       // 'sys_user.actions.set_user_role' retired (#9968) — see the removal
@@ -283,6 +295,8 @@ export const PUBLIC_AUTH_FEATURES = {
       'sys_member.actions.invite_user',
       'sys_invitation.actions.invite_user',
       'sys_organization.actions.invite_user',
+      // A resend is a call to invite-member, which refuses it here.
+      'sys_invitation.actions.resend_invitation',
       // [#27843] The invitation's accept link: no invitation is handed out here.
       'sys_invitation.actions.copy_invitation_link',
       'sys_user.actions.create_user',
@@ -384,8 +398,16 @@ export const PUBLIC_AUTH_FEATURE_NAMES = Object.keys(PUBLIC_AUTH_FEATURES) as [
  * edition. Its intended reader is the console create-organization form, which
  * draws each entry with a generic block and no product words of its own (no
  * form reads it yet). `developerEditionCreate` is derived from it.
+ *
+ * `localSignIn` reports the local sign-in path behind direct sign-in: `hidden`
+ * (the sign-in form stays at `/login?local=1`) or `off` (the sign-in form
+ * offers no local way in). Served while the direct sign-in setting is on,
+ * whatever `directSignIn` reads (it can read `false` when no provider can
+ * start, or when the setting was turned on after start-up and the door is not
+ * mounted). It gates no spec input and changes no server door: the server's
+ * password sign-in is the same either way.
  */
-export const PUBLIC_AUTH_CONFIG_NON_FLAG_KEYS = ['termsUrl', 'privacyUrl', 'tenancyPosture', 'audiencePosture', 'turnstileSiteKey', 'organizationEditions'] as const;
+export const PUBLIC_AUTH_CONFIG_NON_FLAG_KEYS = ['termsUrl', 'privacyUrl', 'tenancyPosture', 'audiencePosture', 'turnstileSiteKey', 'organizationEditions', 'localSignIn'] as const;
 
 /**
  * Capabilities that are RESERVED but deliberately **not advertised** — the

@@ -139,6 +139,7 @@ const ar = {
     // `pnpm check:eager-closure` prints it.
     rowCeilingNote: "يتم عرض أول {{shown}} من أصل {{total}} سجل. ضيّق عامل التصفية.",
     rowCeilingNoteUnknownTotal: "يتم عرض أول {{shown}} سجل. ضيّق عامل التصفية.",
+    ungroupedSection: "أخرى",
   },
   actions: {
     decisionOutput: {
@@ -2972,6 +2973,10 @@ const ar = {
     },
     login: {
       signingIn: "جارٍ تسجيل دخولك…",
+      directSignIn: {
+        description: "سجّل الدخول باستخدام تسجيل الدخول الموحّد لمؤسستك.",
+        retry: "المتابعة بتسجيل الدخول الموحّد",
+      },
       ssoHandoff: "المتابعة إلى {{target}}",
       devAdminHint: {
         title: "بيئة تطوير محلية",
@@ -2993,8 +2998,21 @@ const ar = {
         ssoAccountNotInvited: "حسابك غير مُعدّ في هذا النظام بعد. اطلب من المسؤول دعوتك.",
         ssoAccountNotLinked: "يوجد هنا بالفعل حساب ببريدك الإلكتروني، لكنه غير مرتبط بالدخول الموحّد. سجّل الدخول بطريقة أخرى، أو اطلب من المسؤول ربطه.",
         ssoResponseRejected: "أرسلت خدمة تسجيل الدخول في مؤسستك استجابة لم يتمكن هذا النظام من قبولها. اطلب من المسؤول التحقق من إعداد الدخول الموحّد.",
+        ssoEmailDomainNotAllowed: "لم يُنشأ أي حساب: بريدك الإلكتروني ليس ضمن نطاق يقبل منه هذا النظام حسابات جديدة. استخدم بريد مؤسستك، أو تواصل مع المسؤول.",
+        ssoEmailNotAnAddress: "لم يُنشأ أي حساب: لم ترسل خدمة تسجيل الدخول في مؤسستك عنوان بريد إلكتروني صالحًا لك. اطلب من المسؤول التحقق من إعداد الدخول الموحّد.",
         ssoStartFromLoginPage: "يجب أن يبدأ تسجيل الدخول من صفحة تسجيل الدخول في هذا النظام. أدخل بريد العمل الإلكتروني هنا واختر «تسجيل الدخول باستخدام SSO».",
         ssoTechnicalDetails: "التفاصيل التقنية",
+        directSignInIncomplete: "لم يكتمل تسجيل الدخول: عدت من تسجيل الدخول الموحّد دون أن يتم تسجيل دخولك. تحقّق من أن هذا المتصفح يسمح بملفات تعريف الارتباط لهذا الموقع، ثم حاول مرة أخرى.",
+        directSignInUnavailable: "تعذّر بدء تسجيل الدخول الموحّد لهذا النظام. اطلب من المسؤول التحقق من خدمة تسجيل الدخول التي يستخدمها.",
+        directSignInRateLimited: "بدأ عدد كبير جدًا من عمليات تسجيل الدخول من هذه الشبكة للتو. انتظر بضع ثوانٍ ثم حاول مرة أخرى.",
+        networkNotAllowed: "لا يسمح هذا النظام بتسجيل الدخول من شبكتك. اتصل من شبكة مسموح بها (مثل شبكة مكتب مؤسستك أو شبكة VPN الخاصة بها)، أو تواصل مع المسؤول.",
+        ssoAccessDenied: "الحساب الذي سجّلت الدخول به ليس لديه صلاحية الوصول إلى هذه البيئة. سجّل الدخول بحساب لديه صلاحية الوصول، أو اطلب من مسؤول مؤسسة هذه البيئة إضافتك عضوًا.",
+        ssoSwitchAccount: "تبديل الحساب",
+        ssoBackToConsole: "العودة إلى وحدة التحكم",
+        ssoSwitchAccountHint: "يفتح «تبديل الحساب» خدمة تسجيل الدخول في علامة تبويب جديدة ويسجّل خروجك هناك. ثم سجّل الدخول هنا مرة أخرى بحساب لديه صلاحية الوصول.",
+        linkEmailMismatch: "لم يتم ربط الحساب: عنوان بريده الإلكتروني لا يطابق عنوان البريد الإلكتروني للحساب الذي سجّلت الدخول به. اربط حسابًا يستخدم عنوان البريد الإلكتروني نفسه.",
+        linkAlreadyLinkedToOtherUser: "لم يتم ربط الحساب: إنه مرتبط بالفعل بمستخدم آخر في هذا النظام. اربط حسابًا آخر، أو سجّل الدخول باسم المستخدم المرتبط به وألغِ الربط من هناك أولًا.",
+        linkUnableToLink: "تعذّر ربط الحساب. تأكد من أن عنوان بريده الإلكتروني مُتحقَّق منه لدى خدمة تسجيل الدخول تلك، ثم أعد المحاولة. إذا استمر الفشل، فاتصل بالمسؤول.",
         twoFactorInvalidCode: "هذا الرمز غير صالح. تحقّق من تطبيق المصادقة وحاول مرة أخرى.",
         twoFactorInvalidBackupCode: "رمز النسخ الاحتياطي هذا غير صالح أو سبق استخدامه.",
         twoFactorTooManyAttempts: "رموز غير صحيحة كثيرة جدًا. سجّل الدخول بكلمة المرور مرة أخرى.",
@@ -3391,6 +3409,9 @@ const ar = {
     allDocs: 'كل الوثائق',
     onlineDocs: 'الوثائق عبر الإنترنت',
     loadingDocumentation: 'جارٍ تحميل الوثائق',
+    docConflictTitle: 'اختر حزمة',
+    docConflictDescription: 'توفّر أكثر من حزمة مثبّتة مستندًا باسم {{name}}. افتح المستند الذي تريد قراءته.',
+    docConflictCandidates: 'الحزم التي توفّر هذا المستند',
     documentation: 'الوثائق',
     uncategorized: 'غير مصنف',
     about: 'حول',
@@ -3876,12 +3897,13 @@ const ar = {
       notAllowedToInvite: 'لا يُسمح لك بدعوة مستخدمين إلى هذه المؤسسة.',
       notAllowedToInviteWithRole: 'لا يُسمح لك بدعوة مستخدم بهذا الدور.',
       alreadyInvited: 'تمت دعوة هذا المستخدم إلى هذه المؤسسة بالفعل.',
+      alreadyMember: 'هذا المستخدم عضو بالفعل في هذه المؤسسة.',
       organizationExists: 'هذه المؤسسة موجودة بالفعل.',
       slugTaken: 'هذا المُعرِّف مستخدَم بالفعل.',
       notAllowedToCreate: 'لا يُسمح لك بإنشاء مؤسسة جديدة.',
       organizationLimitReached: 'لقد بلغت الحد الأقصى لعدد المؤسسات التي يمكنك إنشاؤها. لا تُحتسب المؤسسات التي دُعيت إليها ضمن هذا الحد.',
       notTheRecipient: 'لست المستلم المقصود بهذه الدعوة.',
-      invitationNotFound: 'لم تعد هذه الدعوة موجودة أو أنها منتهية الصلاحية.',
+      invitationNotFound: 'تم استخدام هذه الدعوة بالفعل أو انتهت صلاحيتها أو تم إلغاؤها. إذا كنت قد قبلتها، فستجد المؤسسة في قائمة مؤسساتك.',
       unknown: 'حدث خطأ ما. يرجى المحاولة مرة أخرى.',
     },
     backToList: "العودة إلى المؤسسات",
@@ -4294,9 +4316,22 @@ const ar = {
   // pin advances, `chatbotToolLabels-locale-parity-7481` starts checking them
   // against the registry instead of against its own hand-held list.
   chatbot: {
+    modelPicker: {
+      allowanceNote: 'تبقّى {{left}} من حصتك في الذكاء الاصطناعي. النموذج الموسوم بـ ×N يستهلكها أسرع بـ N مرة من النموذج الافتراضي.',
+      confirmTitle: 'هل تريد التبديل إلى {{model}}؟',
+      confirmBody: 'كل رسالة على هذا النموذج تستهلك من حصتك في الذكاء الاصطناعي {{multiplier}} أضعاف ما تستهلكه رسالة على النموذج الافتراضي.',
+      confirmAllowance: 'تبقّى منها {{left}}، وعلى هذا النموذج تنفد أسرع بـ {{multiplier}} مرة.',
+      confirmCancel: 'إلغاء',
+      confirmAction: 'تبديل النموذج',
+    },
     // objectui#13461 — the composer's send button and the scroll-to-latest button.
     sendMessage: 'إرسال الرسالة',
     scrollToBottom: 'الانتقال إلى أحدث رسالة',
+    // objectstack#32984 — a message typed while a reply is running waits above the composer.
+    composer: {
+      queued: "سيُرسل عند انتهاء الرد الحالي",
+      queuedCancel: "إلغاء",
+    },
     answer: {
       showFull: 'عرض الإجابة كاملة',
       collapse: 'طي',
@@ -4312,11 +4347,16 @@ const ar = {
       aggregations: 'التجميعات',
       records: 'السجلات',
       visibleToYou: 'فقط السجلات التي يمكنك رؤيتها',
+      dataset: 'مجموعة البيانات',
+      metrics: 'المقاييس',
+      noAddedFilter: 'لا يوجد عامل تصفية مضاف إلى تعريف مجموعة البيانات',
     },
     tool: {
       aggregate_data: "تجميع البيانات ذات الصلة",
       get_record: "قراءة هذا السجل",
+      list_datasets: "عرض المؤشرات المتاحة",
       query_data: "الاستعلام عن البيانات المطلوبة",
+      query_dataset: "الاستعلام حسب المؤشر",
       query_records: "البحث عن السجلات المطابقة",
       read_package_doc: "قراءة دليل التطبيق",
       search_knowledge: "البحث في قاعدة المعرفة عن معلومات",
@@ -4406,6 +4446,9 @@ const ar = {
       countSeedData: "بيانات تجريبية",
       extendTarget: "إضافة إلى التطبيق الحالي: {{app}}",
       awaitingConfirm: "بانتظار التأكيد",
+      // objectstack#32984 — the plan card's build states.
+      confirmed: "تم التأكيد",
+      buildFailed: "لم يتم البناء — لم يُنشأ أي شيء",
       iterateOrNew: {
         question: "يتداخل هذا مع «{{app}}»، وهو تطبيق لديك بالفعل. هل تريد مواصلة تحسينه أم إنشاء تطبيق منفصل؟",
         questionUnnamed: "يتداخل هذا مع تطبيق لديك بالفعل. هل تريد مواصلة تحسين ذلك التطبيق أم إنشاء تطبيق منفصل؟",
@@ -4416,6 +4459,7 @@ const ar = {
       objectsAndFields: "الكائنات والحقول",
       views: "طرق العرض",
       suggestedField: "مقترح",
+      suggestedFieldLegend: "الحقول المُعلَّمة بـ «{{mark}}» أضافها الذكاء الاصطناعي؛ لم تطلبها.",
       nameField: "الاسم: {{field}}",
     },
     build: {
@@ -4438,6 +4482,19 @@ const ar = {
       verifying: "جارٍ التحقق من التغيير…",
       verifyStep: "الخطوة {{n}}",
       verified: "تم التحقق من التغيير",
+      // objectstack#32984 — the build card's issues line, in the customer's words.
+      issuesCount: "يلزم إصلاح: {{count}}",
+      issuesSummary: "تحتاج بعض أجزاء هذا البناء إلى إصلاح قبل أن يصبح جاهزًا. أجب بـ «أصلح المشكلات» وسيقوم المساعد بإصلاحها.",
+      warningsSummary: "تم بناء التطبيق، مع بعض النقاط التي تستحق المراجعة. اسأل المساعد عنها إذا أردت تحسينه.",
+      issuesDetails: "تفاصيل تقنية",
+      // objectstack#32984 — the published draft badge's failed-item count, which was English in every locale.
+      needsAttention: "بحاجة إلى مراجعة: {{count}}",
+      needsAttention_zero: "بحاجة إلى مراجعة: {{count}}",
+      needsAttention_one: "بحاجة إلى مراجعة: {{count}}",
+      needsAttention_two: "بحاجة إلى مراجعة: {{count}}",
+      needsAttention_few: "بحاجة إلى مراجعة: {{count}}",
+      needsAttention_many: "بحاجة إلى مراجعة: {{count}}",
+      needsAttention_other: "بحاجة إلى مراجعة: {{count}}",
       unknownPhase: "مرحلة إنشاء غير معروفة",
       nextStepsLead: "بعد ذلك يمكنك أن تقول: {{steps}}",
       nextStepQuote: "«{{step}}»",
@@ -4838,6 +4895,11 @@ const ar = {
     daysAgo_other: 'قبل {{count}} يوم',
   },
   preview: {
+    // objectstack#32984 — the list of an object the draft preview shows before its first publish.
+    unpublishedList: {
+      title: "ستظهر السجلات هنا بعد النشر",
+      message: "أنت تعاين كائنًا لم يُنشر بعد، لذلك لا يحتوي على أي سجلات. انشره لبدء إضافة السجلات أو لتحميل بياناته النموذجية.",
+    },
     empty: {
       loadFailedTitle: 'تعذّر تحميل معاينة المسودة',
       loadFailedDescription: 'تعذّرت قراءة طبقة المسودة. أعد المحاولة أو تحقق من الاتصال.',
@@ -5323,6 +5385,7 @@ const ar = {
     disableAppNamed: "تعطيل {{name}}",
     setDefault: "تعيين كافتراضي",
     setDefaultNamed: "تعيين {{name}} كافتراضي",
+    alreadyDefault: "هذا هو التطبيق الافتراضي بالفعل",
     deleteApp: "حذف التطبيق",
     deleteAppNamed: "حذف {{name}}",
     confirmDelete: "انقر مرة أخرى لتأكيد الحذف",

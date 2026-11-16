@@ -377,6 +377,10 @@ export const zhCNMetadataForms: NonNullable<TranslationData['metadataForms']> = 
         label: "所有者可编辑",
         helpText: "开启：子记录的所有者（其 owner_id）只要对父记录有读权限，就可以按 id 更新该行；其他人，以及所有新增、删除、多行更新和代办写入，仍需要对父记录的编辑权限。关闭（默认）：子记录的每一次写入都需要对其父记录的编辑权限。"
       },
+      "sharing.controlledByParent.writeRequiresMasterRead": {
+        label: "可读父记录即可写入",
+        helpText: "开启：凡能读取父记录的人，都可以在子对象自身的权限、行级安全和字段级安全允许的范围内，新增、更新和删除子记录。关闭（默认）：子记录的每一次写入都需要对其父记录的编辑权限。不要与“所有者可编辑”同时开启，本开关已涵盖它。"
+      },
       access: {
         label: "访问策略",
         helpText: "通配授权策略（ADR-0066 D2）。不声明时按 public 处理。它决定权限集的 '*' 对象授权是否覆盖本对象；用户之间的记录可见性由 sharingModel 决定。"
@@ -963,15 +967,27 @@ export const zhCNMetadataForms: NonNullable<TranslationData['metadataForms']> = 
       },
       refusals: {
         label: "拒绝目录",
-        helpText: "拒绝目录，以正文抛出的 SCREAMING_SNAKE 错误码为键（例如 CLEAN_VERSION_REQUIRED）。调用方读到声明的提示语（按其语言翻译）和声明的状态码。仅适用于 JavaScript（L2）正文"
+        helpText: "拒绝目录，以钩子抛出的 SCREAMING_SNAKE 错误码为键（例如 CLEAN_VERSION_REQUIRED）。调用方读到声明的提示语（按其语言翻译）和声明的状态码。适用于 JavaScript（L2）正文或处理器；表达式正文声明会被拒绝"
       },
       "refusals.message": {
         label: "提示语",
-        helpText: "正文抛出此错误码时用户读到的句子——纯文本，不含占位符"
+        helpText: "正文抛出此错误码时用户读到的句子。纯文本；若该条目声明了参数，则 {{ name }} 占位符填入一个已声明的参数"
       },
       "refusals.status": {
         label: "状态码",
         helpText: "拒绝的 HTTP 状态码（400–499）。不填：400"
+      },
+      "refusals.reasons": {
+        label: "原因",
+        helpText: "同一错误码下的更多句子，以正文在错误码旁抛出的 snake_case 原因为键（{ code, reason }）。线上的错误码和状态码仍取本条目的；未在此声明的原因会被拒绝。不填：抛出的原因不被读取"
+      },
+      "refusals.reasons.message": {
+        label: "提示语",
+        helpText: "正文在此错误码下抛出此原因时用户读到的句子。其中的 {{ }} 占位符遵循本条目的参数"
+      },
+      "refusals.params": {
+        label: "参数",
+        helpText: "句子可填入的名称（例如 state）：正文抛出 { code, params: { state } }，{{ state }} 占位符即显示该值。不填：句子为纯文本"
       },
       handler: {
         label: "处理器",

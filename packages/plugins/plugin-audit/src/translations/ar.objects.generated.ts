@@ -41,10 +41,11 @@ export const arObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "تغيير صلاحية مسؤول المنصّة",
           action_invocation: "استدعاء إجراء",
           package_uninstall: "إلغاء تثبيت حزمة",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "استيراد حزمة غير مُدارة",
+          credential_use: "استخدام بيانات الاعتماد",
+          scim_refused: "رفض طلب SCIM",
+          audit_signing_key_change: "تغيير مفتاح توقيع التدقيق",
+          dataset_query: "استعلام مجموعة بيانات"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const arObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

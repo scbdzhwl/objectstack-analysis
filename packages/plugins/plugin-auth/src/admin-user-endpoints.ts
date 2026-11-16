@@ -155,7 +155,12 @@ export interface AdminUserEndpointDeps {
    * Absent ⇒ no join: the creation behaves as before.
    */
   getCallerActiveOrganizationId?(): Promise<string | null>;
-  logger?: { warn(msg: string): void };
+  /**
+   * The mount's logger. `error` receives, once, a failure that carries no
+   * vendor code and is answered with the generic internal-error message
+   * ({@link mapAuthApiError}).
+   */
+  logger?: { warn(msg: string): void; error?(message: string, error?: Error): void };
 }
 
 /**
@@ -240,8 +245,9 @@ import { readJsonRequestBody } from './request-json-body.js';
 import { cloudManagedRefusal } from './cloud-managed.js';
 import { identitySourceUnreadable, judgeSsoOnlyLocalPassword, readUserSource, ssoOnlyPasswordRefusal } from './sso-only-local-password.js';
 import { temporaryPasswordLength } from './temporary-password-length.js';
+import { isPendingSsoSource, pendingSsoPasswordRefusal } from './pending-sso-marker.js';
 import { isCloudManaged } from '@objectstack/core';
-import { resolveThrownHttpError, validationFailureDetails } from '@objectstack/types';
+import { INTERNAL_ERROR_MESSAGE, resolveThrownHttpError, validationFailureDetails } from '@objectstack/types';
 import type { FieldErrorCode } from '@objectstack/spec/api';
 
 const SYSTEM_CTX = { isSystem: true, positions: [], permissions: [] };
@@ -466,16 +472,21 @@ async function stampMustChangePassword(
  * endpoint created the user" as a determinant — an admin-created account is
  * not an implicit invitation.
  *
- * Returns the shape the response/audit consumed pre-ADR-0093:
- * `membershipCreated` is true only when THIS call inserted the row (a `bound`
- * outcome); a `yielded` outcome (the hook or a race already bound it) reports
- * the org with `membershipCreated: false`. Under `invite-only` the reconciler
- * answers `policy-skip` before it looks at any org, so the caller reports no
- * organization and `membershipCreated: false` — the account is created, the
- * membership is not.
+ * Returns what the response and the audit row report: `membershipCreated`
+ * says the store holds a membership for the new account after this call,
+ * whichever writer made the row. The account did not exist before this call,
+ * so any membership it holds was created by this creation — a `bound` outcome
+ * (this call inserted it) and a `yielded` outcome (the `user.create.after`
+ * reconciler or a host hook bound it moments earlier, during the same
+ * `createUser`) both answer `true`. Reporting `yielded` as `false` told the
+ * administrator a member-less account had been made while `sys_member` held
+ * the row. Under `invite-only` the reconciler answers `policy-skip` before it
+ * looks at any org, so the caller reports no organization and
+ * `membershipCreated: false` — the account is created, the membership is not.
+ * A `failed` / `no-target-org` / `agent-account` outcome reports `false`.
  */
-async function bindUserToSoleOrganization(
-  deps: AdminUserEndpointDeps,
+export async function bindUserToSoleOrganization(
+  deps: Pick<AdminUserEndpointDeps, 'getDataEngine' | 'getMembershipPolicy' | 'getTenancy' | 'logger'>,
   userId: string,
 ): Promise<{ organizationId: string | null; membershipCreated: boolean }> {
   const engine = deps.getDataEngine();
@@ -497,7 +508,7 @@ async function bindUserToSoleOrganization(
   });
   return {
     organizationId: result.organizationId ?? null,
-    membershipCreated: result.outcome === 'bound',
+    membershipCreated: result.outcome === 'bound' || result.outcome === 'yielded',
   };
 }
 
@@ -512,7 +523,8 @@ async function bindUserToSoleOrganization(
  * - `placeholderEmail` — the admin created a phone-only identity, so the
  *   address on the account is a generated placeholder. The decision, never
  *   the address.
- * - `membershipCreated` — this call bound the membership (ADR-0093 D2).
+ * - `membershipCreated` — the new account holds a membership after this call
+ *   (ADR-0093 D2), whichever writer made the row during this creation.
  * - `organizationId` — a reference to the organization bound to, a record of
  *   its own; present only when one was resolved.
  *
@@ -521,11 +533,17 @@ async function bindUserToSoleOrganization(
  * mirror row for the same write, in the snapshot column the ledger's read
  * side narrows.
  */
-type AdminAuditDecisions =
+export type AdminAuditDecisions =
   | {
       event: 'user.admin_created';
       placeholderEmail: boolean;
       passwordGenerated: boolean;
+      membershipCreated: boolean;
+      organizationId?: string;
+    }
+  | {
+      /** A pending, SSO-only person was added (`pending-sso-users.ts`); no password exists. */
+      event: 'user.admin_added_pending';
       membershipCreated: boolean;
       organizationId?: string;
     }
@@ -597,8 +615,8 @@ type AdminAuditDecisions =
  * the pins in `admin-user-endpoints.test.ts` fail on any key outside the
  * decision set and on any value this call wrote into the user.
  */
-async function writeAdminAudit(
-  deps: AdminUserEndpointDeps,
+export async function writeAdminAudit(
+  deps: Pick<AdminUserEndpointDeps, 'getDataEngine' | 'logger'>,
   entry: {
     action: 'create' | 'update';
     actor: AdminActor;
@@ -655,17 +673,45 @@ async function writeAdminAudit(
   }
 }
 
-export function mapAuthApiError(error: unknown, fallback: string): EndpointResult {
+/**
+ * Map what a vendor call threw onto the endpoint envelope.
+ *
+ * A refusal keeps its own message and status: one the vendor classifies (it
+ * carries a body code; `USER_ALREADY_EXISTS` is normalised to 409), and one
+ * whose status says it is addressed to the caller (4xx). Anything else is an
+ * unclassified internal failure: it is answered `INTERNAL_ERROR` in the
+ * generic words every route catch in `auth-plugin.ts` uses, and the error is
+ * handed to `logger.error` once (to `logger.warn` on a sink without one), as
+ * `[AuthPlugin] <fallback>` — the thrown
+ * error's own text never reaches the caller. The status is read the same way
+ * in every case.
+ *
+ * @param fallback  names the route's failure (`'create-user failed'`); it is
+ *                  the log line, and a classified refusal's message when the
+ *                  vendor sent none.
+ */
+export function mapAuthApiError(
+  error: unknown,
+  fallback: string,
+  logger?: { warn(msg: string): void; error?(message: string, error?: Error): void },
+): EndpointResult {
   const e = error as {
     statusCode?: number;
     status?: number | string;
     body?: { code?: string; message?: string };
     message?: string;
   } | null;
-  const code = e?.body?.code ?? 'INTERNAL_ERROR';
-  const message = e?.body?.message ?? e?.message ?? fallback;
+  const vendorCode = e?.body?.code ?? undefined;
   const rawStatus =
     typeof e?.statusCode === 'number' ? e.statusCode : typeof e?.status === 'number' ? e.status : 500;
+  if (vendorCode === undefined && !(rawStatus >= 400 && rawStatus <= 499)) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    if (logger?.error) logger.error(`[AuthPlugin] ${fallback}`, failure);
+    else logger?.warn(`[AuthPlugin] ${fallback}: ${failure.message}`);
+    return { status: rawStatus, body: { success: false, error: { code: 'INTERNAL_ERROR', message: INTERNAL_ERROR_MESSAGE } } };
+  }
+  const code = vendorCode ?? 'INTERNAL_ERROR';
+  const message = e?.body?.message ?? e?.message ?? fallback;
   const status = code === 'USER_ALREADY_EXISTS' ? 409 : rawStatus;
   return { status, body: { success: false, error: { code, message } } };
 }
@@ -734,7 +780,7 @@ export async function runAdminCreateUser(
   try {
     lengthPolicy = (await deps.getAuthContext()).password.config;
   } catch (error) {
-    return mapAuthApiError(error, 'create-user failed');
+    return mapAuthApiError(error, 'create-user failed', deps.logger);
   }
   const resolved = await resolvePassword(deps, body, 'password', lengthPolicy);
   if ('status' in resolved) return resolved;
@@ -836,7 +882,7 @@ export async function runAdminCreateUser(
         },
       });
     } catch (error) {
-      return mapAuthApiError(error, 'create-user failed');
+      return mapAuthApiError(error, 'create-user failed', deps.logger);
     }
 
     const userId = created?.user?.id;
@@ -943,7 +989,7 @@ interface CreatedAccount {
 }
 
 /** [#25338] Thrown out of the unit of work so it rolls back; carries the refusal the caller answers. */
-class CreationRefused extends Error {
+export class CreationRefused extends Error {
   constructor(readonly result: EndpointResult) {
     super(result.body.error?.message ?? 'user creation refused');
     this.name = 'CreationRefused';
@@ -967,11 +1013,14 @@ class CreationRefused extends Error {
  * `membershipPolicy: 'invite-only'` admits (D1). The role is `member`, the D1
  * default: elevation stays the separate, audited `update-member-role`.
  *
- * A membership already there is respected and reported as
- * `membershipCreated: false`, exactly as the reconciler reports it.
+ * A membership already there is respected (no second `addMember`) and
+ * reported as `membershipCreated: true`: the account was created by this call,
+ * so a row in the current organization was written during this creation (a
+ * host's `user.create.after` hook, say) — the same rule the single-org bind
+ * answers by.
  */
-async function joinCurrentOrganization(
-  deps: AdminUserEndpointDeps,
+export async function joinCurrentOrganization(
+  deps: Pick<AdminUserEndpointDeps, 'getDataEngine' | 'logger'>,
   addMember: AddMemberCapableApi['addMember'],
   userId: string,
   organizationId: string,
@@ -983,12 +1032,12 @@ async function joinCurrentOrganization(
       { where: { organization_id: organizationId, user_id: userId }, limit: 1 },
       { context: SYSTEM_CTX },
     );
-    if (Array.isArray(existing) && existing.length > 0) return { organizationId, membershipCreated: false };
+    if (Array.isArray(existing) && existing.length > 0) return { organizationId, membershipCreated: true };
   }
   try {
     await addMember({ body: { userId, role: 'member', organizationId } });
   } catch (error) {
-    const refused = mapAuthApiError(error, 'organization/add-member failed');
+    const refused = mapAuthApiError(error, 'organization/add-member failed', deps.logger);
     throw new CreationRefused({
       status: refused.status,
       body: {
@@ -1013,7 +1062,9 @@ async function joinCurrentOrganization(
  * default-organization bind, unchanged. A host that wires no way to read the
  * caller's current organization does not join either.
  */
-function multiOrgCreationJoinsCurrentOrganization(deps: AdminUserEndpointDeps): boolean {
+export function multiOrgCreationJoinsCurrentOrganization(
+  deps: Pick<AdminUserEndpointDeps, 'getTenancy' | 'getCallerActiveOrganizationId'>,
+): boolean {
   return deps.getTenancy?.()?.isolationActive === true && typeof deps.getCallerActiveOrganizationId === 'function';
 }
 
@@ -1083,7 +1134,7 @@ export async function runAdminSetUserPassword(
   try {
     authCtx = await deps.getAuthContext();
   } catch (error) {
-    return mapAuthApiError(error, 'set-user-password failed');
+    return mapAuthApiError(error, 'set-user-password failed', deps.logger);
   }
   const resolved = await resolvePassword(deps, body, 'newPassword', authCtx.password.config);
   if ('status' in resolved) return resolved;
@@ -1093,29 +1144,24 @@ export async function runAdminSetUserPassword(
       return { status: 404, body: { success: false, error: { code: 'RESOURCE_NOT_FOUND', message: 'User not found' } } };
     }
 
-    // [#25083] On a cloud-managed environment a password is set here only on
-    // a local account. An `idp_provisioned` user signs in through the hosting
-    // organisation's identity provider, which owns their password; an
-    // `env_native` row (the break-glass administrator among them) still
-    // answers, because ADR-0135 D5.2 narrows by population, never wholesale.
-    if (isCloudManaged()) {
-      const source = await readUserSource(deps.getDataEngine(), userId);
-      if (!source.ok) {
-        return {
-          status: 503,
-          body: {
-            success: false,
-            error: {
-              code: 'SERVICE_UNAVAILABLE',
-              message:
-                "The user's identity source could not be read, so whether this cloud-managed environment may set "
-                + 'their password here cannot be judged. No password was changed.',
-            },
-          },
-        };
-      }
-      if (source.value === 'idp_provisioned') return cloudManagedRefusal('setUserPassword');
+    // A pending person (`sys_user.source = 'idp_pending'`, added through
+    // `admin/add-sso-user`) signs in only through the hosting organisation's
+    // identity provider and holds no local password until then, in every mode
+    // and for every caller (`pending-sso-users.ts`). A source that cannot be
+    // read is judged by the arms below exactly as before: none of them existed
+    // for a pending row, and no row carried the marker before it did.
+    const pendingSource = await readUserSource(deps.getDataEngine(), userId);
+    if (pendingSource.ok && isPendingSsoSource(pendingSource.value)) {
+      return pendingSsoPasswordRefusal('setUserPassword');
     }
+
+    // [#25083] [#33203] On a cloud-managed environment no password is set
+    // here for anyone: everyone signs in through the hosting organisation's
+    // identity provider, and a hosted environment keeps no local break-glass
+    // administrator (ruling 10 of objectstack-ai/cloud#4465). So no arm below
+    // reads the target's identity source: an `env_native` row is refused like
+    // an `idp_provisioned` one. `cloud-managed.ts` states the rule.
+    if (isCloudManaged()) return cloudManagedRefusal('setUserPassword');
 
     // With SSO-only mode on, an IdP-provisioned user signs in through the
     // identity provider and is given no local password here; the one exception
@@ -1146,7 +1192,7 @@ export async function runAdminSetUserPassword(
       });
     }
   } catch (error) {
-    return mapAuthApiError(error, 'set-user-password failed');
+    return mapAuthApiError(error, 'set-user-password failed', deps.logger);
   }
 
   // The flag write is credited to the administrator this route admitted (and,

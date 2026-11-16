@@ -1,5 +1,89 @@
 # @objectstack/driver-turso
 
+## 18.5.0
+
+### Patch Changes
+
+- e302d32: fix: a package upgrade that makes a field `storage: { notNull: false }` relaxes the NOT NULL column the earlier version built
+  
+  Clause-②: yes (widening) — new root exports of @objectstack/cloud-connection (relaxInstallDeclaredNotNull, declaredNullableColumns, types InstallRelaxDriver/InstallRelaxEngine/InstallRelaxEntry/InstallRelaxReport) and the public method SqlDriver.relaxDeclaredNotNull
+  Metadata-protocol: none
+  
+  A package field that was `storage: { notNull: true }` and is now `storage: { notNull: false }` kept its NOT NULL column on every database an earlier version built, so every write that left the field empty was refused by the database. The install's schema sync is additive, the boot never relaxes a column, and the publish that applies the relax for an environment-authored object is refused for a sealed package object (`NOT_OVERRIDABLE`), so only `os migrate apply` on the environment's own database could fix it.
+  
+  - The install door (`POST /api/v1/marketplace/install-local`, `os package install`) now relaxes, after a managed install or upgrade's schema sync, each NOT NULL column whose field the installing package's own body declares `storage: { notNull: false }`: its objects, and the fields its `objectExtensions` contribute. A column another package or a customization declares is never that install's to relax, an undeclared NOT NULL stays as it is, and no other drift kind is applied. A boot or rehydrate still applies nothing.
+  - `SqlDriver.relaxDeclaredNotNull(obj, columns, opts?)` is the new driver door it asks, and `relaxInstallDeclaredNotNull` / `declaredNullableColumns` are exported from `@objectstack/cloud-connection` so a host's own install door can call the same step after its schema sync.
+  - The `[schema-drift]` warning and `os migrate plan` now name the remedy per object kind: publishing applies it for an object authored in the environment, a managed install or upgrade of its package applies it for a package object, and `os migrate apply` relaxes it deliberately for either.
+  - On the Turso REMOTE face the new driver door is inherited: a relax needs the SQLite table rebuild that transport does not run, so it comes back skipped with the face's reason, which the install logs.
+- Updated dependencies [f229dfd]
+- Updated dependencies [322ded7]
+- Updated dependencies [f4cafd5]
+- Updated dependencies [c747cf0]
+- Updated dependencies [c747cf0]
+- Updated dependencies [30e364e]
+- Updated dependencies [605d712]
+- Updated dependencies [05b56ef]
+- Updated dependencies [f31f784]
+- Updated dependencies [7ffbb1a]
+- Updated dependencies [89d7bef]
+- Updated dependencies [51ceb43]
+- Updated dependencies [d635599]
+- Updated dependencies [548f8ff]
+- Updated dependencies [16e3486]
+- Updated dependencies [d38ceba]
+- Updated dependencies [6538ba4]
+- Updated dependencies [9673030]
+- Updated dependencies [84c66d3]
+- Updated dependencies [a1604ce]
+- Updated dependencies [6c5d31f]
+- Updated dependencies [b462444]
+- Updated dependencies [61ed314]
+- Updated dependencies [40c73a8]
+- Updated dependencies [2c98485]
+- Updated dependencies [9317833]
+- Updated dependencies [01d206d]
+- Updated dependencies [01d206d]
+- Updated dependencies [1f8ce6e]
+- Updated dependencies [c312b26]
+- Updated dependencies [5b2ec82]
+- Updated dependencies [3e19223]
+- Updated dependencies [1b878e7]
+- Updated dependencies [6482c08]
+- Updated dependencies [6222ecb]
+- Updated dependencies [728be58]
+- Updated dependencies [1fd5d8a]
+- Updated dependencies [26b5994]
+- Updated dependencies [0ba30eb]
+- Updated dependencies [27d042f]
+- Updated dependencies [4dbcbdd]
+- Updated dependencies [09da8c7]
+- Updated dependencies [53f5a4c]
+- Updated dependencies [bc50d11]
+- Updated dependencies [0be91f0]
+- Updated dependencies [df9fe94]
+- Updated dependencies [8f9eb3d]
+- Updated dependencies [1da43fe]
+- Updated dependencies [6ff3eee]
+- Updated dependencies [8b53cc8]
+- Updated dependencies [67725f1]
+- Updated dependencies [b392ff7]
+- Updated dependencies [489ef5f]
+- Updated dependencies [ee627c6]
+- Updated dependencies [53b3544]
+- Updated dependencies [b070e1c]
+- Updated dependencies [3cbf1f2]
+- Updated dependencies [89defde]
+- Updated dependencies [06e53a7]
+- Updated dependencies [f64c0f9]
+- Updated dependencies [dd291b8]
+- Updated dependencies [c94a4da]
+- Updated dependencies [e997113]
+- Updated dependencies [615c67f]
+- Updated dependencies [67274ac]
+  - @objectstack/spec@18.5.0
+  - @objectstack/core@18.5.0
+  - @objectstack/driver-sql@18.5.0
+
 ## 18.4.0
 
 ### Minor Changes

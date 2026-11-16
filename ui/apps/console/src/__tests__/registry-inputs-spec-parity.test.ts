@@ -264,6 +264,11 @@ import {
 // test/hook timeout (AGENTS.md §测试纪律, objectui#3010).
 import '@object-ui/components';
 import '../register-plugins';
+// `@object-ui/plugin-form` too: the console registers its tags as lazy stubs
+// since its first load stopped carrying the package (objectstack#33581), and
+// a stub carries no `inputs`, so without this import the three form blocks
+// leave `covered`.
+import '@object-ui/plugin-form';
 
 // ── objectui#8176: the blocks `register-plugins` alone cannot show this gate ──
 //
@@ -310,6 +315,10 @@ import '@object-ui/plugin-tree';
 import '@object-ui/plugin-map';
 import '@object-ui/plugin-gantt';
 import '@object-ui/plugin-timeline';
+// The same remedy for `list-view`, which the console registers as a lazy stub
+// since its first load stopped carrying `@object-ui/plugin-list`
+// (objectstack#33581): without this import the block leaves `covered`.
+import '@object-ui/plugin-list';
 
 /** This block's spec props schema, or `undefined` when this pin has none. */
 const specSchema = (type: string): unknown => (ComponentPropsMap as Record<string, unknown>)[type];

@@ -322,7 +322,9 @@ import {
 // [#25467 cut 14] The publish batch's seed apply and its own pending declarations.
 import { applySeedBodiesOnHost, collectBatchPendingDeclarations } from './protocol-publish-batch.js';
 // [#25467 cut 15] The artifact registry's lookups: an item's artifact, the packages that ship a type, and the lock's artifact layer.
-import { artifactLockLayerAt, lookupArtifactItem, shippedArtifactsOf, shippingPackagesOf } from './protocol-artifact-lookup.js';
+import {
+    type ArtifactOwnerKey, artifactLockLayerAt, lookupArtifactItem, shippedArtifactsOf, shippingPackagesOf,
+} from './protocol-artifact-lookup.js';
 // [#25467 cut 16] The stored-overlay row reads: a type's active rows, their parsed entries, the names with a row of their own, and one item's rows.
 import { namesWithOwnStoredRow, readActiveOverlayRows, readItemActiveRows, storedOverlayEntries } from './protocol-stored-overlay-reads.js';
 // [#25467 cut 17] The object-owner verdicts: which contributor kind a stored object row registers as, and handing an adopted object's name to its rebound row.
@@ -613,7 +615,7 @@ import { ProtocolWriteGatesFacet } from './protocol-write-gates.js';
 // [#29985 codemod] The static tables of the facet above: the class's fields read them (#30147).
 import { ProtocolWriteGatesTables } from './protocol-write-gates-tables.js';
 // [#29985 codemod] Registry hydration, view expansion, write-through, object storage: the members below delegate to its facet, `ProtocolRegistryHydrationFacet`.
-import { ProtocolRegistryHydrationFacet } from './protocol-registry-hydration.js';
+import { ProtocolRegistryHydrationFacet, type ObjectRegistryRefusal, type RegistryHealStop, type RegistryWriteThroughRequest } from './protocol-registry-hydration.js';
 import type { HealPackageBinding } from './protocol-heal-binding.js';
 // [#29985 codemod] Save refusals, saveMetaItem, saveConflict, migrateStoredMetadata: the members below delegate to its facet, `ProtocolSaveFacet`.
 import { ProtocolSaveFacet } from './protocol-save.js';
@@ -1753,6 +1755,7 @@ export class ObjectStackProtocolImplementation implements
      */
     private runAuthoringGate(evt: {
         type: string; name: string; state: 'draft' | 'active'; body: unknown;
+        userTextLocales?: readonly (string | undefined)[];
     }): Promise<void> {
         // [#25467 cut 8] The body moved to `protocol-authoring-gate.ts` (see `AuthoringGateHost`).
         const readAuthoringGates = () => this.authoringGates;
@@ -1846,6 +1849,8 @@ export class ObjectStackProtocolImplementation implements
          * round trip for a secret it still holds.
          */
         restoredCredentialPaths?: () => Promise<readonly string[]>;
+        /** [#32656] The write request's `userTextLocales`, for the findings' `userMessage`. */
+        userTextLocales?: readonly (string | undefined)[];
     }): Promise<RuntimeAuthoringIssue[]> {
         // [#25467 cut 8] The body moved to `protocol-authoring-gate.ts` (see `AuthoringGateHost`).
         const readAuthoringChannel = () => this.authoringChannel;
@@ -4205,7 +4210,9 @@ export class ObjectStackProtocolImplementation implements
      * `409 RESOURCE_CONFLICT`, the holders sorted and the `?package=`
      * prescription), asked of the same resolution
      * ({@link packagelessAddress} at `active`, at the addressed bundle member,
-     * read in full): one answer to one ambiguity. `undefined` for a name one
+     * read in full): one answer to one ambiguity. [#32622] It also carries
+     * its holders as a package-scoped refusal (`refusal.candidates`), so both
+     * transports answer them as `details.candidates`. `undefined` for a name one
      * package holds, none does, or only the package-unbound row does, and for
      * every request that names a package (the caller asks only without one).
      *
@@ -4219,7 +4226,10 @@ export class ObjectStackProtocolImplementation implements
      * `createMetaLayeredAnswer`), ⛔ never inside {@link getMetaItemLayered}:
      * its in-process resolution readers (the security catalog echo, the
      * packaged-permission-set lock gate, `/published`) read the layers of a
-     * name with no package and keep the answer they had.
+     * name with no package and keep the answer they had. [#32914] Those
+     * readers do meet the registry's own refusal of a name two packages
+     * register in code, which {@link getMetaItemLayered} asks as
+     * `getMetaItem` does.
      *
      * [#32354, ADR-0150 D3] While a package is disabled, a name the stored
      * rows of two or more served packages hold beside it is refused here
@@ -4284,6 +4294,10 @@ export class ObjectStackProtocolImplementation implements
      *         layer's MetadataService read reporting `degraded` with nothing
      *         in the registry to answer instead, carrying the failing loaders'
      *         messages on `cause`.
+     * @throws `PackageScopedNameRefusedError` — [#32914, ADR-0150 D3/D5] 409 /
+     *         `RESOURCE_CONFLICT`, naming no package, for a name two or more
+     *         served packages register in code: the registry's own refusal, as
+     *         {@link getMetaItem} throws it, before any layer is read.
      *
      * [#29814] `opts.withDraft` adds the `draft` layer
      * (`GetMetaItemLayeredResponseSchema.draft`): the pending draft row the
@@ -6895,7 +6909,7 @@ export class ObjectStackProtocolImplementation implements
      */
     private uninstalledNamedBaseRefusal(
         request: { type: string; name: string; packageId?: string | null },
-        how: { verb?: 'save' | 'publish'; inherited?: boolean } = {},
+        how: { verb?: 'save' | 'publish' | 'rollback'; inherited?: boolean } = {},
     ): Error | null {
         // [#25467 cut 33] The body moved to `protocol-package-scope.ts` (see `PackageScopeHost`).
         const host: ThisParameterType<typeof uninstalledNamedBaseRefusal> = {
@@ -7086,14 +7100,22 @@ export class ObjectStackProtocolImplementation implements
      * member whose artifact to answer, as its discriminator value; omitted,
      * the bundle's artifact canonical-first. A registry without the parameter
      * ignores it, so a caller that needs the member checks the answer.
+     *
+     * [ADR-0150 D4, #33456] `owner` — for an `action`, the owner key of the
+     * item the envelope is for: only an artifact bound to that object (or,
+     * `object` undefined, object-less) answers, since an action is keyed
+     * `(package, object, name)`. Naming no package, it is the one package
+     * whose own artifact is bound there, else none. Omitted, by name, as
+     * before.
      */
-    private lookupArtifactItem(type: string, name: string, currentPackageId?: string, member?: string): unknown {
+    private lookupArtifactItem(type: string, name: string, currentPackageId?: string, member?: string,
+        owner?: ArtifactOwnerKey): unknown {
         // [#25467 cut 15] The body moved to `protocol-artifact-lookup.ts` (see `ArtifactLookupHost`).
         const readEngine = () => this.engine;
         const host: ThisParameterType<typeof lookupArtifactItem> = {
             get engine() { return readEngine(); },
         };
-        return lookupArtifactItem.call(host, type, name, currentPackageId, member);
+        return lookupArtifactItem.call(host, type, name, currentPackageId, member, owner);
     }
 
     /**
@@ -8029,7 +8051,7 @@ export class ObjectStackProtocolImplementation implements
     }
 
     /** Docblock and body: {@link ProtocolRegistryHydrationFacet.applyObjectRegistryMutation} in `protocol-registry-hydration.ts` [#29985 codemod]. */
-    private async applyObjectRegistryMutation(request: { type: string; name: string; item?: any; packageId?: string | null }): Promise<void> {
+    private async applyObjectRegistryMutation(request: { type: string; name: string; item?: any; packageId?: string | null }): Promise<ObjectRegistryRefusal | undefined> {
         // [#29985 codemod] The body moved to `protocol-registry-hydration.ts`; it reaches this class through `protocol-host.ts`.
         return ProtocolRegistryHydrationFacet.applyObjectRegistryMutation(protocolHost(this), request);
     }
@@ -8383,20 +8405,7 @@ export class ObjectStackProtocolImplementation implements
     }
 
     /** Docblock and body: {@link ProtocolRegistryHydrationFacet.applyRegistryWriteThrough} in `protocol-registry-hydration.ts` [#29985 codemod]. */
-    private async applyRegistryWriteThrough(request: {
-        type: string;
-        name: string;
-        item?: any;
-        packageId?: string | null;
-        /** The row's org scope — `null` for an env-wide row. [#6602] */
-        organizationId: string | null;
-        /**
-         * [#23198] The binding the write moved the row from, when it moved it
-         * (an orphan adoption): `null` for the package-less row. See
-         * {@link HydrationOptions}.
-         */
-        reboundFrom?: { readonly packageId: string | null };
-    }): Promise<void> {
+    private async applyRegistryWriteThrough(request: RegistryWriteThroughRequest): Promise<ObjectRegistryRefusal | undefined> {
         // [#29985 codemod] The body moved to `protocol-registry-hydration.ts`; it reaches this class through `protocol-host.ts`.
         return ProtocolRegistryHydrationFacet.applyRegistryWriteThrough(protocolHost(this), request);
     }
@@ -8418,7 +8427,7 @@ export class ObjectStackProtocolImplementation implements
          * No effect for a type with no members.
          */
         member?: string,
-    ): Promise<void> {
+    ): Promise<RegistryHealStop | undefined> {
         // [#29985 codemod] The body moved to `protocol-registry-hydration.ts`; it reaches this class through `protocol-host.ts`.
         return ProtocolRegistryHydrationFacet.restoreArtifactRegistryView(protocolHost(this), type, name, organizationId, packageId, member);
     }
@@ -9537,6 +9546,14 @@ export class ObjectStackProtocolImplementation implements
      * construction: `saveMetaItem` refuses them outright (#5086), and the one
      * write channel they retain — `deleteMetaItem`'s legacy raw-engine branch
      * on a control-plane kernel — appends no `sys_metadata_history` row.
+     *
+     * [ADR-0150 D3/D4, #32905] For a type stored per `(package, name)`, a
+     * name two row slots hold, or one the bare plain read refuses, is refused
+     * `409` naming every holder when no package is named, and `packageId`
+     * reads that holder's versions alone: its own, plus those attributed to
+     * no package or to the environment while it is the name's only slot
+     * (`protocol-history-slots.ts`). A name one holder holds reads as before.
+     * `packageId` on any other type is refused `400 VALIDATION_ERROR`.
      */
     async historyMetaItem(request: {
         type: string;
@@ -9545,6 +9562,8 @@ export class ObjectStackProtocolImplementation implements
         limit?: number;
         /** [#22877] The bundle member whose lineage to read — {@link resolveBundleMemberSelector}; omitted, the canonical one. */
         member?: string;
+        /** [ADR-0150 D3/D4, #32905] The package whose versions to read; omitted, the name's (refused for two holders). */
+        packageId?: string;
     }): Promise<{ events: import('@objectstack/metadata-core').MetadataEvent[] }> {
         // [#29985 codemod] The body moved to `protocol-history-and-publish.ts`; it reaches this class through `protocol-host.ts`.
         return ProtocolHistoryAndPublishFacet.historyMetaItem(protocolHost(this), request);
@@ -9715,6 +9734,8 @@ export class ObjectStackProtocolImplementation implements
          * all address it, so the body judged is the body that goes live.
          */
         member?: string;
+        /** [#32656] The write request's `userTextLocales`, for the findings' `userMessage`. */
+        userTextLocales?: readonly (string | undefined)[];
         /** The registry question this promotion asks (`registry-question.ts`). */
         registryQuestion: RegistryQuestion;
         /** [#32396] Judge every refusal, write nothing: the answer then carries no `result`. */
@@ -9757,6 +9778,7 @@ export class ObjectStackProtocolImplementation implements
         materializeApplied?: PublishMaterializeResult;
         projectionApplied?: MutationProjectionOutcome;
         storageRefused?: RuntimeAuthoringIssue;
+        registryRefused?: RuntimeAuthoringIssue;
     }> {
         // [#29985 codemod] The body moved to `protocol-history-and-publish.ts`; it reaches this class through `protocol-host.ts`.
         return ProtocolHistoryAndPublishFacet.runPublishSideEffects(protocolHost(this), args);
@@ -10033,6 +10055,8 @@ export class ObjectStackProtocolImplementation implements
         message?: string;
         /** ADR-0067 — AI model that authored the turn (absent for human/CLI). */
         aiModel?: string;
+        /** [#32656] The locales the door states for the findings' user sentences (stated by the door, never read from the body; see `SaveMetaItemRequestSchema.userTextLocales`). */
+        userTextLocales?: readonly (string | undefined)[];
         /**
          * [#24253] Opt-in: fields THIS publish adds whose literal
          * `defaultValue` is written into the object's existing rows once the
@@ -10064,8 +10088,12 @@ export class ObjectStackProtocolImplementation implements
          * `success === (outcome === 'published')` — `success` keeps its exact
          * pre-#10462 value and is now derivable. Values are lowercase snake,
          * matching the `sys_metadata_audit` outcome vocabulary.
+         * [#33277] `published_unregistered`: the drafts landed as on
+         * `published`, but the runtime registry refused a promoted object, so
+         * it is not served; `unregistered` is present if and only if this is
+         * the outcome, and `success` is false on it.
          */
-        outcome: 'published' | 'refused' | 'nothing_to_publish';
+        outcome: 'published' | 'published_unregistered' | 'refused' | 'nothing_to_publish';
         publishedCount: number;
         failedCount: number;
         published: Array<{
@@ -10090,6 +10118,14 @@ export class ObjectStackProtocolImplementation implements
             advisories?: RuntimeAuthoringIssue[];
         }>;
         failed: Array<{ type: string; name: string; error: string; code?: string }>;
+        /**
+         * [#33277] Each promoted object the runtime registry refused, in
+         * publish order, under the rule its `published[]` element's warning
+         * carries. Present only on `outcome: 'published_unregistered'`, and
+         * then non-empty; the object stays in `published[]` (its metadata is
+         * live) but is not served until something registers it.
+         */
+        unregistered?: Array<{ type: string; name: string; rule: 'object-registry-refused' }>;
         /** Aggregate result of materializing every published `seed` (absent when no seeds). */
         seedApplied?: { success: boolean; inserted: number; updated: number; error?: string; errors?: unknown[]; landed?: SeedAppliedLandedParsed[] };
         /**
@@ -10814,6 +10850,27 @@ export class ObjectStackProtocolImplementation implements
      * {@link rollbackToPackageCommit} inherited it, so a whole-package
      * rollback could report success and change nothing the process could see.
      *
+     * [#33563] …and an item whose row was written but whose next step did not
+     * land is reported in `failed[]`, not `reverted[]`: the registry refused
+     * the restored object, its storage did not follow the restored body (the
+     * advisory stays on `advisories`), its mutation projector failed, or a
+     * step after the row write threw. The entry names the row state (removed,
+     * or restored to the body of version N) beside the step that failed, and
+     * the revert's own commit still records the row change.
+     * [#33851] That holds for every type: a restored item whose registry
+     * write-through threw (not only an `object` the registry refused), and a
+     * removed item whose registry heal stopped, so the registry may still
+     * serve the removed row.
+     *
+     * [#33564, ADR-0067 D3] The revert's own commit records, per row it
+     * changed, the version that row held before the revert (`prevVersion`),
+     * and `existedBefore` true exactly when the row was there, so reverting
+     * the revert restores what it replaced: the restored body's predecessor,
+     * or the removed row, written again. An item recorded as existing before
+     * the commit but with no version to restore (the shape revert commits
+     * recorded before this) is named in `failed[]`, with nothing written,
+     * never skipped.
+     *
      * [#9174] An item whose STORED `type` is non-canonical
      * ({@link isNonCanonicalStoredType}) is REFUSED on the restore limb, into
      * `failed[]` with `code: 'STORED_TYPE_NOT_CANONICAL'` — the same wire-visible
@@ -10884,11 +10941,16 @@ export class ObjectStackProtocolImplementation implements
      * `failed[]` carries both kinds of failure a step can have: a step that
      * THREW (one entry for the commit), and every item a step REFUSED and
      * reported in its own returned `failed[]` (one entry per item, its `error`
-     * naming the item and quoting the step's client-facing text). Either makes
-     * `success` false — the declared answer's "true exactly when nothing
-     * failed". A refused item stops neither its commit nor the rollback: the
-     * step still reverts the item's neighbours and records its revert commit,
-     * so that commit is also listed in `revertedCommits`.
+     * naming the item and quoting the step's client-facing text) — an item
+     * whose row the step wrote but whose registry, storage or projection step
+     * failed among them, its row state named. Either makes `success` false —
+     * the declared answer's "true exactly when nothing failed". A refused item
+     * stops neither its commit nor the rollback: the step still reverts the
+     * item's neighbours and attempts its own revert commit, so that commit is
+     * also listed in `revertedCommits`. [#33486] That record is best effort:
+     * when the commit store is unprovisioned or the write fails, nothing is
+     * recorded and the step's answer omits `revertCommitId`, so the step is on
+     * no package-commit timeline and cannot itself be reverted as a commit.
      *
      * [#32700] `advisories` carries every step's own `advisories` (its storage
      * sync refusals and stored-expression fill notices), in step order;
@@ -10921,9 +10983,22 @@ export class ObjectStackProtocolImplementation implements
      * 409 (`VERSION_NOT_RESTORABLE`) when the target is a delete
      * tombstone (no body to bring back).
      *
-     * [#29848, ADR-0146 D8 item 2] The door names no package: it restores
-     * into the row the by-name read naming no package serves, a `.custom`
-     * pair's declared override over a row bound to its read-only base.
+     * [#29848, ADR-0146 D8 item 2] Naming no package, it restores into the
+     * row the by-name read naming no package serves, a `.custom` pair's
+     * declared override over a row bound to its read-only base.
+     *
+     * [ADR-0150 D3/D4, #32905] For a type stored per `(package, name)`, a
+     * name two row slots hold is refused `409` naming every holder when no
+     * package is named, with nothing written (so is a name the bare plain
+     * read refuses); `packageId` restores into that holder's row (its own,
+     * its pair's declared override, or the package-less row its read falls
+     * back to), and the version must be that holder's: another holder's, or
+     * one attributed to no package or to the environment while another slot
+     * holds the name, answers 404 `VERSION_NOT_FOUND`. A name one holder
+     * holds, named bare, restores any of its versions as before.
+     * `packageId` on any other type is refused `400 VALIDATION_ERROR`, and
+     * one naming no installed package where no row is stored is refused
+     * `422 WRITABLE_PACKAGE_REQUIRED` (`protocol-history-slots.ts`).
      *
      * [#32700] Then, as the save door does: the restored object's storage is
      * synced, and every stored computed field the restore makes compute
@@ -11028,6 +11103,14 @@ export class ObjectStackProtocolImplementation implements
      * next read falls through to the artifact-loaded default. Implements the
      * "Reset to factory default" semantic from ADR-0005. Whitelist is shared
      * with {@link saveMetaItem}.
+     *
+     * [#32958] A removal that hands an object back the definition beneath it
+     * (an `object_extension` that re-declared a stored computed field) fills
+     * every stored computed field it made compute something new over the
+     * object's existing rows, as
+     * the save door does (`protocol-stored-expression-fill.ts`), each reported
+     * on `advisories`, omitted when empty. An unfinished fill never fails the
+     * delete.
      */
     async deleteMetaItem(request: DeleteMetaItemRequest): Promise<{
         success: boolean;
@@ -11036,6 +11119,8 @@ export class ObjectStackProtocolImplementation implements
         seq?: number;
         /** [ADR-0094] Outcome of the awaited mutation projector, when one is registered. */
         projectionApplied?: MutationProjectionOutcome;
+        /** [#32958] The stored-expression fill of the object the removal changed; omitted when nothing to report. */
+        advisories?: RuntimeAuthoringIssue[];
     }> {
         // [#29985 codemod] The body moved to `protocol-diff-delete-load.ts`; it reaches this class through `protocol-host.ts`.
         return ProtocolDiffDeleteLoadFacet.deleteMetaItem(protocolHost(this), request);
@@ -11049,6 +11134,8 @@ export class ObjectStackProtocolImplementation implements
         seq?: number;
         /** [ADR-0094] Outcome of the awaited mutation projector, when one is registered. */
         projectionApplied?: MutationProjectionOutcome;
+        /** [#32958] The stored-expression fill of the object the removal changed; omitted when nothing to report. */
+        advisories?: RuntimeAuthoringIssue[];
     }> {
         // [#29985 codemod] The body moved to `protocol-diff-delete-load.ts`; it reaches this class through `protocol-host.ts`.
         return ProtocolDiffDeleteLoadFacet.deleteMetaItemUnaudited(protocolHost(this), request);

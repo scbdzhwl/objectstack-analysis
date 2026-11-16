@@ -21,6 +21,7 @@ import { describe, it, expect, vi } from 'vitest';
 import '@objectstack/metadata';
 
 import { HttpDispatcher } from '../http-dispatcher.js';
+import { SchemaRegistry } from '@objectstack/objectql';
 
 const CRM = 'com.crm.pkg';
 const HR = 'com.hr.pkg';
@@ -473,10 +474,248 @@ describe('/automation/connectors/:ns/:name/connection — a connector instance b
         expect(automation.getConnectorConnection).not.toHaveBeenCalled();
     });
 
+    it('[ADR-0150 D9, #31699] a name two packages hold: each namespace\'s address reads, connects and revokes its own package\'s instance (FROM: 409 naming both)', async () => {
+        const { call, automation } = dispatcherWith(connectors);
+        for (const [ns, pkg] of [['crm', CRM], ['hr', HR]] as const) {
+            const read = await call(`/connectors/${ns}/mail/connection`, 'GET');
+            expect(read.status, JSON.stringify(read.body)).toBe(200);
+            expect(automation.getConnectorConnection.mock.calls.at(-1)?.[0]).toMatchObject({ connector: 'mail', package: pkg });
+        }
+        // CONTROL: the one-holder address names no package; the bare door names none.
+        await call('/connectors/crm/stripe/connection', 'GET');
+        expect(automation.getConnectorConnection.mock.calls.at(-1)?.[0]).not.toHaveProperty('package');
+    });
+
     it('CONTROL — the literal segments keep their routes: `oauth` and `credential-refs` are never read as a namespace', async () => {
         // A package booted under `oauth` (held before the install refusal) holds `stripe`.
         const { call, automation } = dispatcherWith({ packages: { 'connector:stripe': [HR] }, namespaces: { [HR]: 'oauth' } });
         await call('/connectors/oauth/stripe/connection', 'GET');
         expect(automation.getConnectorConnection).not.toHaveBeenCalled();
+    });
+});
+
+/**
+ * [ADR-0150 D3, #33386; seat rulings 6884403301 and Q2 6888807772] A name two
+ * packages hold, one of them disabled, through the real dispatcher over a real
+ * `SchemaRegistry` (its `disablePackage`, its served filter), in both
+ * registration orders. The doors judge the SERVED holders: the bare name is the
+ * one served holder's slot or instance; an address naming the disabled holder
+ * is refused naming the served holder only; `_env` and a third namespace name
+ * the served holder only; with both disabled, nothing is reached.
+ */
+describe('[#33386] the by-name doors judge the served holders of a name two packages hold', () => {
+    const OPS = 'com.ops.pkg';
+    const ORDERS = [[CRM, HR], [HR, CRM]];
+
+    function registryOf(order: readonly string[], disabled: readonly string[]) {
+        const registry = new SchemaRegistry();
+        registry.logLevel = 'silent';
+        for (const [id, namespace] of [[CRM, 'crm'], [HR, 'hr'], [OPS, 'ops']]) {
+            registry.installPackage({ id, name: id, version: '1.0.0', type: 'app', namespace } as never, 'code');
+        }
+        for (const holder of order) {
+            registry.registerItem('flow', { name: 'convert', _packageId: holder }, 'name' as never, holder);
+            registry.registerItem('connector', { name: 'mail', _packageId: holder }, 'name' as never, holder);
+        }
+        for (const id of disabled) registry.disablePackage(id);
+        return registry;
+    }
+
+    function dispatcherOver(registry: SchemaRegistry) {
+        const slotOf = (pkg: string | null, name: string) => (name === 'convert' && pkg !== null && [CRM, HR].includes(pkg) ? `${pkg}/convert` : undefined);
+        const automation = {
+            handlerReady: true,
+            getFlow: vi.fn(async () => null),
+            execute: vi.fn(async (name: string) => ({ success: false, error: `Flow '${name}' not found` })),
+            toggleFlow: vi.fn(async () => {}),
+            listRunsPage: vi.fn(async () => ({ runs: [] as unknown[], hasMore: false })),
+            getConnectorConnection: vi.fn(async (request: { connector: string }) => ({ connector: request.connector, status: 'not_connected' })),
+            getActionDescriptors: vi.fn(() => []),
+            getFlowRuntimeStates: vi.fn(() => []),
+            flowSlotKey: vi.fn(slotOf),
+            getFlowSlot: vi.fn((pkg: string | null, name: string) => (slotOf(pkg, name) ? { name, label: `${pkg} flow` } : null)),
+            executeSlot: vi.fn(async (pkg: string | null) => ({ success: true, output: { ran: pkg } })),
+            toggleFlowSlot: vi.fn(async () => {}),
+        };
+        const services: Record<string, unknown> = { automation, objectql: { registry } };
+        const resolve = (name: string) => services[name];
+        const kernel: any = { getService: resolve, getServiceAsync: async (name: string) => resolve(name), context: { getService: resolve } };
+        const dispatcher = new HttpDispatcher(kernel);
+        const call = async (path: string, method: string, body: unknown = {}) => {
+            const answered = await dispatcher.handleAutomation(path, method, body, { request: {}, executionContext: ADMIN } as any, {});
+            return { status: answered.response?.status ?? 200, body: answered.response?.body as any };
+        };
+        return { call, automation };
+    }
+
+    const packagesOf = (a: { body?: any }) => (candidatesOf(a) ?? []).map((c: { packageId?: string }) => c.packageId);
+
+    describe.each(ORDERS.map((order) => [order.join(' then '), order] as const))('registered %s', (_o, order) => {
+        it('CONTROL — nothing disabled: the bare doors refuse naming both; each address is its own slot or instance', async () => {
+            const { call, automation } = dispatcherOver(registryOf(order, []));
+            const bare = await call('/convert/trigger', 'POST');
+            expect([bare.status, packagesOf(bare)]).toEqual([409, [...order]]);
+            const mail = await call('/connectors/mail/connection', 'GET');
+            expect([mail.status, packagesOf(mail)]).toEqual([409, [...order]]);
+            expect((await call('/crm/convert/trigger', 'POST')).status).toBe(200);
+            expect(automation.executeSlot.mock.calls.map((c) => c[0])).toEqual([CRM]);
+            expect((await call('/connectors/hr/mail/connection', 'GET')).status).toBe(200);
+            expect(automation.getConnectorConnection.mock.calls.at(-1)?.[0]).toMatchObject({ connector: 'mail', package: HR });
+        });
+
+        it('CRM disabled — flow: the bare door runs HR\'s slot (FROM 409 naming both); CRM\'s address is refused naming HR (FROM CRM\'s slot ran); HR\'s address is HR\'s slot', async () => {
+            const { call, automation } = dispatcherOver(registryOf(order, [CRM]));
+            expect((await call('/convert/trigger', 'POST')).status).toBe(200);
+            expect(automation.executeSlot.mock.calls.map((c) => c[0])).toEqual([HR]);
+            const off = await call('/crm/convert/trigger', 'POST');
+            expect([off.status, codeOf(off), packagesOf(off)]).toEqual([409, 'RESOURCE_CONFLICT', [HR]]);
+            expect((await call('/hr/convert/trigger', 'POST')).status).toBe(200);
+            for (const path of ['/_env/convert/trigger', '/ops/convert/trigger']) {
+                const other = await call(path, 'POST');
+                expect([path, other.status, packagesOf(other)]).toEqual([path, 409, [HR]]);
+            }
+            expect(automation.executeSlot.mock.calls.map((c) => c[0])).toEqual([HR, HR]);
+            expect(automation.execute).not.toHaveBeenCalled();
+        });
+
+        it('CRM disabled — connector (Q2 rows): the address naming CRM is refused naming HR (FROM 404 from the service); HR\'s address and the bare name connect HR\'s instance (bare FROM 409 naming both); `_env` and a third namespace name HR only (FROM naming both)', async () => {
+            const { call, automation } = dispatcherOver(registryOf(order, [CRM]));
+            const off = await call('/connectors/crm/mail/connection', 'GET');
+            expect([off.status, codeOf(off), packagesOf(off)]).toEqual([409, 'RESOURCE_CONFLICT', [HR]]);
+            expect(automation.getConnectorConnection).not.toHaveBeenCalled();
+            for (const path of ['/connectors/hr/mail/connection', '/connectors/mail/connection']) {
+                expect((await call(path, 'GET')).status, path).toBe(200);
+                expect(automation.getConnectorConnection.mock.calls.at(-1)?.[0], path).toMatchObject({ connector: 'mail', package: HR });
+            }
+            for (const path of ['/connectors/_env/mail/connection', '/connectors/ops/mail/connection']) {
+                const other = await call(path, 'GET');
+                expect([path, other.status, packagesOf(other)]).toEqual([path, 409, [HR]]);
+            }
+            expect(automation.getConnectorConnection).toHaveBeenCalledTimes(2);
+        });
+
+        it('the definition writes (PUT, DELETE, clone) under a disable: an address naming CRM, `_env` or a third namespace is refused naming HR only (FROM: naming both); HR\'s address still names both; both disabled, an address answers 404 (FROM: 409)', async () => {
+            const writes = (prefix: string) => [
+                [`${prefix}/convert`, 'PUT', { name: 'convert', type: 'autolaunched' }],
+                [`${prefix}/convert`, 'DELETE', {}],
+                [`${prefix}/convert/clone`, 'POST', { name: 'convert_copy' }],
+            ] as const;
+            const oneOff = dispatcherOver(registryOf(order, [CRM]));
+            for (const prefix of ['/crm', '/_env', '/ops']) {
+                for (const [path, method, body] of writes(prefix)) {
+                    const answer = await oneOff.call(path, method, body);
+                    expect([path, method, answer.status, codeOf(answer), packagesOf(answer)]).toEqual([path, method, 409, 'RESOURCE_CONFLICT', [HR]]);
+                }
+            }
+            // Not moved: HR's own address keeps the 409 naming every holder.
+            for (const prefix of ['/hr']) {
+                for (const [path, method, body] of writes(prefix)) {
+                    const answer = await oneOff.call(path, method, body);
+                    expect([path, method, answer.status, packagesOf(answer).sort()]).toEqual([path, method, 409, [CRM, HR].sort()]);
+                }
+            }
+            const bothOff = dispatcherOver(registryOf(order, [CRM, HR]));
+            for (const prefix of ['/crm', '/hr']) {
+                for (const [path, method, body] of writes(prefix)) {
+                    expect([path, method, (await bothOff.call(path, method, body)).status]).toEqual([path, method, 404]);
+                }
+            }
+            for (const h of [oneOff, bothOff]) expect(h.automation.executeSlot).not.toHaveBeenCalled();
+        });
+
+        it('both disabled: no address reaches a flow or an instance (404); the bare door and `_env` reach no slot, and the service answers them with no package', async () => {
+            const { call, automation } = dispatcherOver(registryOf(order, [CRM, HR]));
+            for (const path of ['/crm/convert/trigger', '/hr/convert/trigger']) expect((await call(path, 'POST')).status, path).toBe(404);
+            for (const path of ['/connectors/crm/mail/connection', '/connectors/hr/mail/connection']) expect((await call(path, 'GET')).status, path).toBe(404);
+            expect((await call('/convert/trigger', 'POST')).status).toBe(404);
+            expect(automation.executeSlot).not.toHaveBeenCalled();
+            for (const path of ['/connectors/mail/connection', '/connectors/_env/mail/connection']) {
+                await call(path, 'GET');
+                expect(automation.getConnectorConnection.mock.calls.at(-1)?.[0], path).not.toHaveProperty('package');
+            }
+        });
+    });
+});
+
+/**
+ * [ADR-0150 D3, #33905] A flow name one package holds, that package disabled,
+ * over a real `SchemaRegistry`: its namespaced address is refused `404` at
+ * admission, before the service is asked. The bare path reaches the engine,
+ * whose bare entries now answer as for a flow it does not hold (`getFlow`
+ * `null`, pinned in service-automation's `flow-slots-per-package.test.ts`),
+ * so each bare door answers what the address answers. The service here
+ * answers as the engine does for such a flow.
+ */
+describe('[#33905] a flow whose only holder\'s package is disabled: the bare door answers as its namespaced address (404)', () => {
+    function registryHolding(disabled: boolean) {
+        const registry = new SchemaRegistry();
+        registry.logLevel = 'silent';
+        registry.installPackage({ id: CRM, name: CRM, version: '1.0.0', type: 'app', namespace: 'crm' } as never, 'code');
+        registry.registerItem('flow', { name: 'solo', _packageId: CRM }, 'name' as never, CRM);
+        if (disabled) registry.disablePackage(CRM);
+        return registry;
+    }
+
+    function dispatcherOver(registry: SchemaRegistry, held: boolean) {
+        const automation = {
+            handlerReady: true,
+            getFlow: vi.fn(async (name: string) => (held && name === 'solo' ? { name } : null)),
+            execute: vi.fn(async (name: string) => (held ? { success: true, output: {} } : { success: false, error: `Flow '${name}' not found` })),
+            toggleFlow: vi.fn(async (name: string) => { if (!held) throw new Error(`Flow '${name}' not found`); }),
+            listRunsPage: vi.fn(async () => ({ runs: [] as unknown[], hasMore: false })),
+            getActionDescriptors: vi.fn(() => []),
+            getFlowRuntimeStates: vi.fn(() => []),
+        };
+        const services: Record<string, unknown> = { automation, objectql: { registry } };
+        const resolve = (name: string) => services[name];
+        const kernel: any = { getService: resolve, getServiceAsync: async (name: string) => resolve(name), context: { getService: resolve } };
+        const dispatcher = new HttpDispatcher(kernel);
+        const call = async (path: string, method: string, body: unknown = {}) => {
+            const answered = await dispatcher.handleAutomation(path, method, body, { request: {}, executionContext: ADMIN } as any, {});
+            return { status: answered.response?.status ?? 200, body: answered.response?.body as any };
+        };
+        return { call, automation };
+    }
+
+    const DOORS: ReadonlyArray<readonly [string, string, string, unknown]> = [
+        ['/solo', '/crm/solo', 'GET', {}],
+        ['/solo/trigger', '/crm/solo/trigger', 'POST', {}],
+        ['/trigger/solo', '/trigger/crm/solo', 'POST', {}],
+        ['/solo/toggle', '/crm/solo/toggle', 'POST', { enabled: false }],
+        ['/solo/runs', '/crm/solo/runs', 'GET', {}],
+    ];
+
+    it('each bare door answers 404 as its namespaced address does; nothing runs or switches (FROM: the bare door served the flow)', async () => {
+        const { call, automation } = dispatcherOver(registryHolding(true), false);
+        for (const [bare, addressed, method, body] of DOORS) {
+            const viaAddress = await call(addressed, method, body);
+            const viaBare = await call(bare, method, body);
+            expect([bare, viaBare.status, codeOf(viaBare)]).toEqual([bare, 404, codeOf(viaAddress)]);
+            expect([addressed, viaAddress.status]).toEqual([addressed, 404]);
+        }
+        expect(automation.execute).not.toHaveBeenCalled();
+        expect(automation.toggleFlow).not.toHaveBeenCalled();
+        expect(automation.listRunsPage).not.toHaveBeenCalled();
+    });
+
+    it('the clone door with the flow as its source answers 404 as its namespaced address does; nothing is registered (FROM: the source was copied)', async () => {
+        const { call, automation } = dispatcherOver(registryHolding(true), false);
+        const registerFlow = vi.fn();
+        (automation as Record<string, unknown>).registerFlow = registerFlow;
+        const viaAddress = await call('/crm/solo/clone', 'POST', { name: 'solo_copy', label: 'Solo copy' });
+        const viaBare = await call('/solo/clone', 'POST', { name: 'solo_copy', label: 'Solo copy' });
+        expect([viaBare.status, codeOf(viaBare)]).toEqual([404, codeOf(viaAddress)]);
+        expect(viaAddress.status).toBe(404);
+        expect(registerFlow).not.toHaveBeenCalled();
+    });
+
+    it('CONTROL — the package enabled: the address is its bare path, and both serve the flow', async () => {
+        const { call } = dispatcherOver(registryHolding(false), true);
+        for (const [bare, addressed, method, body] of DOORS) {
+            const viaAddress = await call(addressed, method, body);
+            const viaBare = await call(bare, method, body);
+            expect([bare, viaBare.status]).toEqual([bare, 200]);
+            expect([addressed, viaAddress.status]).toEqual([addressed, 200]);
+        }
     });
 });

@@ -40,14 +40,17 @@ import { lintUnknownAuthoringKeys, lintUnknownStackKeys } from './kernel/metadat
 // Data Protocol
 import { ObjectSchema, ObjectExtensionSchema } from './data/object.zod';
 import { controlledByParentMasterRefusal } from './data/controlled-by-parent-master';
+import { recordMasterDetailRequiredOmissions } from './data/master-detail-required-omission';
 import { fieldGroupBodyTableRefusal, type NamedInboundRelationship } from './data/related-list-body-table';
 import { externalBindingDatasourceRefusal } from './data/external-binding-datasource';
 import { InlineGridColumnSchema, summaryFunctionReadsField } from './data/field.zod';
 import {
   isRecordCurrencyCodeField,
+  recordCurrencyDynamicRollupNotHomeError,
   recordCurrencyFollowedCodeError,
   recordCurrencyRecordRollupError,
   recordCurrencyUnfollowedRollupError,
+  storedHomeAmountSourceOf,
 } from './data/record-currency-path';
 import { AUDIT_FIELD_DEFS } from './data/injected-system-column-provenance';
 import { pageComponentSlotPositions } from './ui/component.zod';
@@ -4738,15 +4741,35 @@ function recordCurrencyPathOf(field: unknown): { via: string; code: string } | u
  * code field is not judged here: D6's first bullet refuses it at runtime
  * registration, and this pass does not repeat it.
  *
+ * (d) A `summary` (`sum`, `min`, `max`, `avg`) declaring
+ * `currencyMode: 'dynamic'` (or a `currencyConfig` with no `currencyMode`,
+ * which is `dynamic`) is admitted only when the child field it rolls up is a
+ * stored home amount: a field that some `currencyConfig.homeAmount.field` on
+ * the child object names (#33659), where that `homeAmount` is valid as declared
+ * (`storedHomeAmountSourceOf`: a field merged in from an extension never had
+ * the object door's reading, so a `homeAmount` naming a plain number, a `fixed`
+ * amount or a writable field does not make it a home amount). ADR-0144 D6 has consolidated totals read
+ * that home field, and D8 rule 5 makes it "a `dynamic`-mode currency field",
+ * displayed in the organization's home currency (`localization.currency`);
+ * every row of it is in that one currency, so its total is too, and declaring
+ * `dynamic` on the roll-up says so without naming the code (D8 rule 5:
+ * "Metadata never names the home currency"). Any other `dynamic` roll-up is
+ * refused: the faces would draw it in the home currency, which the amounts it
+ * reads are not known to be in. The object door has already refused a
+ * `dynamic` summary that names no child field or carries a `defaultCurrency`,
+ * and a `count` (`refuseUnadmittedSummaryCurrency`).
+ *
  * Resolution is against the stack's own `objects`, merged with its
  * `objectExtensions` by name; an object this stack does not declare is not
  * judged, nor is a parent it knows only through an extension (whose owner's
  * fields live elsewhere), nor, for (c), a child it knows only through an
- * extension or a child field it does not hold; and neither is a roll-up whose
+ * extension or a child field it does not hold (for (c) and (d) alike); and neither is a roll-up whose
  * relationship field is neither written nor the child's one relation back to
- * the parent.
+ * the parent. A pair this pass skips because the stack knows an end only
+ * through an extension is judged by the engine registry against the objects
+ * as the server serves them, at the end of the run that installs the stack.
  *
- * The (a) and (c)-unfollowed wording is `data/record-currency-path.ts`'s,
+ * The (a), (c)-unfollowed and (d) wording is `data/record-currency-path.ts`'s,
  * shared with the engine registry, which judges the same pairs at a
  * single-object save.
  */
@@ -4787,6 +4810,19 @@ function collectRecordCurrencyPathErrors(config: ObjectStackDefinition): string[
       const childField = hasOwnKey(child, ops.field) ? child[ops.field] : undefined;
       const judgeRecord = summaryCurrency?.currencyMode === 'record' && declared.has(ops.object) && childField !== undefined;
       const rollup = { object: objectName, field: fieldName, fn: String(ops.function), childObject: ops.object, childField: ops.field };
+      // (d) A `dynamic` roll-up is admitted over a stored home amount only
+      // (#33659), judged against a child this stack declares and a child field
+      // it holds, as (c) is; a home field is admitted whatever else it is, so
+      // nothing below judges it again.
+      if (
+        summaryCurrency !== undefined && (summaryCurrency.currencyMode ?? 'dynamic') === 'dynamic'
+        && declared.has(ops.object) && childField !== undefined
+      ) {
+        if (storedHomeAmountSourceOf(child, ops.field) === undefined) {
+          errors.push(recordCurrencyDynamicRollupNotHomeError(rollup, child, childField));
+        }
+        continue;
+      }
       const refuseRecord = (why: string): void => {
         errors.push(recordCurrencyRecordRollupError(rollup, why));
       };
@@ -7030,6 +7066,19 @@ function buildDefinedStack(
   // enforced, Prime Directive #12). No alias canonicalization — the deprecated
   // `aiStudio`/`aiSeat` spellings were removed in #3308.
   const data = result.data;
+
+  // [ADR-0055 §1 as amended · ruling A] The parse just wrote `false` into every
+  // omitted `required`, so on a `controlled_by_parent` object an omitted one
+  // now reads as the optional master — the reading the ruling keeps. The
+  // omission itself is still visible here, in the input the parse read, and
+  // nowhere downstream: record it on the parsed field, where `os lint`'s
+  // `relationship/master-detail-required` reads it to report the omitted
+  // spelling the ruling promises it reports. Nothing parsed changes, and
+  // nothing is refused (`master-detail-required-omission.ts`).
+  recordMasterDetailRequiredOmissions(
+    (normalized as Record<string, unknown>).objects,
+    (data as Record<string, unknown>).objects,
+  );
 
   const capErrors = validateKnownCapabilities(data);
   if (capErrors.length > 0) {

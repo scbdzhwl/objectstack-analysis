@@ -453,16 +453,20 @@ describe('MCP resumeRun — (b) a caller who may not resume is refused before th
         expect(h.engine.resume).not.toHaveBeenCalled();
     });
 
-    it('a confirmation-gated action without confirm: ACTION_CONFIRMATION_REQUIRED / 428; with it, the run completes', async () => {
+    it('[#33690] a confirmation-gated action: ACTION_CONFIRMATION_REQUIRED / 428 with confirm and without it (no pending-confirmation service here), and the run stays paused', async () => {
         const h = makeHarness();
-        const runId = await startPaused(h, CONFIRMED.name, 'u1', { confirm: true });
-        const refused = await refusalOf(h.bridgeFor('u1').resumeRun(runId, { values: { subject: 'x' } }));
-        expect(refused).toMatchObject({ code: 'ACTION_CONFIRMATION_REQUIRED', status: 428 });
-        expect(refused.details).toEqual({ actionName: 'close_lead', objectName: OBJECT, confirmationMember: 'confirm' });
+        // Started as the engine would have it: `run_action` itself hands a
+        // gated call off now, so it starts no run to resume.
+        const started: any = await h.engine.execute(CONFIRMED.target, { userId: 'u1', object: OBJECT, record: { id: 'lead_1' } });
+        for (const input of [{ values: { subject: 'x' } }, { values: { subject: 'x' }, confirm: true }]) {
+            const refused = await refusalOf(h.bridgeFor('u1').resumeRun(started.runId, input));
+            expect(refused, JSON.stringify(input)).toMatchObject({ code: 'ACTION_CONFIRMATION_REQUIRED', status: 428 });
+            expect(refused.details).toEqual({
+                actionName: 'close_lead', objectName: OBJECT, confirmationMember: 'confirm', reason: 'no_confirmation_service',
+            });
+        }
         expect(h.engine.resume).not.toHaveBeenCalled();
-
-        await h.bridgeFor('u1').resumeRun(runId, { values: { subject: 'x' }, confirm: true });
-        expect(h.engine.tasks).toHaveLength(1);
+        expect(h.engine.tasks).toHaveLength(0);
     });
 
     it('a run paused on something other than a screen: 409, and the engine is not asked', async () => {
@@ -488,7 +492,9 @@ describe('[ADR-0151 D3 rule 3] MCP resumeRun — an AI service account does not 
         for (const input of [{ values: { subject: 'x' }, confirm: true }, { values: { subject: 'x' } }]) {
             const refused = await refusalOf(h.bridgeAs(ACCOUNT_EC).resumeRun(started.runId, input));
             expect(refused, JSON.stringify(input)).toMatchObject({ code: 'ACTION_CONFIRMATION_REQUIRED', status: 428 });
-            expect(refused.details).toEqual({ actionName: CONFIRMED.name, objectName: OBJECT, confirmationMember: 'confirm' });
+            expect(refused.details).toEqual({
+                actionName: CONFIRMED.name, objectName: OBJECT, confirmationMember: 'confirm', reason: 'service_account',
+            });
             expect(refused.message).not.toMatch(/retry/i);
         }
         expect(h.engine.resume).not.toHaveBeenCalled();
@@ -508,13 +514,15 @@ describe('[ADR-0151 D3 rule 3] MCP resumeRun — an AI service account does not 
         expect(h.invocations).toHaveLength(1);
     });
 
-    it('CONTROL: a delegated agent resumes a gated action as before — refused without the member, completed with it', async () => {
+    it('[#33690] a delegated agent is not an account: its gated resume reaches the hand-off step (no service here: reason no_confirmation_service), with the member and without it', async () => {
         const h = makeHarness();
         const started: any = await h.engine.execute(CONFIRMED.target, { userId: 'u1', object: OBJECT, record: { id: 'lead_1' } });
-        const refused = await refusalOf(h.bridgeAs(DELEGATED_EC).resumeRun(started.runId, { values: { subject: 'x' } }));
-        expect(refused).toMatchObject({ code: 'ACTION_CONFIRMATION_REQUIRED', status: 428 });
-        await h.bridgeAs(DELEGATED_EC).resumeRun(started.runId, { values: { subject: 'x' }, confirm: true });
-        expect(h.engine.tasks).toHaveLength(1);
+        for (const input of [{ values: { subject: 'x' } }, { values: { subject: 'x' }, confirm: true }]) {
+            const refused = await refusalOf(h.bridgeAs(DELEGATED_EC).resumeRun(started.runId, input));
+            expect(refused).toMatchObject({ code: 'ACTION_CONFIRMATION_REQUIRED', status: 428 });
+            expect(refused.details?.reason).toBe('no_confirmation_service');
+        }
+        expect(h.engine.tasks).toHaveLength(0);
     });
 });
 
@@ -861,6 +869,57 @@ describe('MCP resumeRun — a run of a flow name two namespaces hold (ADR-0150 D
         const runId = parkedRunOf(hr, CRM, SCHEDULE.target);
         expect((await refusalOf(hr.bridgeFor('u1').resumeRun(runId, { values: { subject: 'Call back' } }))).status).toBe(403);
         expect(hr.engine.resume).not.toHaveBeenCalled();
+    });
+
+    /**
+     * [ADR-0150 D3, #33386; seat ruling 6884403301, amendments 3 and 4] CRM
+     * disabled: a run filed under CRM's slot key is no served holder's. CRM's
+     * own action reaches no flow (a disabled caller's own holding answers
+     * none), so it cannot resume CRM's run; HR's action reaches HR's flow,
+     * never CRM's run. HR's run is still resumed through HR's own action.
+     */
+    const withCrmDisabled = {
+        ...registry,
+        isPackageDisabled: (id: string) => id === CRM,
+        // The registry's served read: a disabled package holds no name, but the caller's own holding stays.
+        packageScopedHoldersOf: (type: string, name: string, caller?: string | null, read?: { includeDisabledPackages?: boolean }) =>
+            registry.packageScopedHoldersOf(type, name).filter((id) => read?.includeDisabledPackages === true || id === caller || id !== CRM),
+    };
+    it('[#33386] CRM disabled: CRM\'s paused run is resumed by no action (FROM: CRM\'s own action resumed it), and stays parked', async () => {
+        for (const objectPackage of [CRM, HR]) {
+            const h = makeHarness({ actions: [SCHEDULE], objectPackage, registry: withCrmDisabled });
+            const runId = parkedRunOf(h, CRM);
+            const refusal = await refusalOf(h.bridgeFor('u1').resumeRun(runId, { values: { subject: 'Call back' } }));
+            expect(refusal.status, objectPackage).toBe(403);
+            expect([h.engine.resume.mock.calls.length, h.engine.runs.get(runId)?.status], objectPackage).toEqual([0, 'paused']);
+        }
+    });
+
+    it('[#33386] CONTROL — CRM disabled: HR\'s paused run is resumed through HR\'s own action, as before', async () => {
+        const h = makeHarness({ actions: [SCHEDULE], objectPackage: HR, registry: withCrmDisabled });
+        const runId = parkedRunOf(h, HR);
+        const resumed = await h.bridgeFor('u1').resumeRun(runId, { values: { subject: 'Call back' } });
+        expect(resumed).toMatchObject({ ok: true, action: SCHEDULE.name });
+        expect(h.engine.resume.mock.calls.map((c: unknown[]) => c[0])).toEqual([runId]);
+    });
+
+    it('[#33386] CRM disabled: HR\'s paused run is resumed through a package-less action and through BOTH\'s (depends on CRM and HR) (FROM: 403, the name answered two holders)', async () => {
+        const BOTH = 'com.both.pkg';
+        const manifestOf = (id: string) => (id === BOTH
+            ? { id, namespace: 'both', dependencies: { [CRM]: '^1.0.0', [HR]: '^1.0.0' } }
+            : { id, namespace: id === CRM ? 'crm' : 'hr' });
+        const withBoth = {
+            ...withCrmDisabled,
+            getPackage: (id: string) => ({ manifest: manifestOf(id), source: 'code' }),
+            getAllPackages: () => [CRM, HR, BOTH].map((id) => ({ manifest: manifestOf(id), source: 'code' })),
+        };
+        for (const objectPackage of [undefined, BOTH]) {
+            const h = makeHarness({ actions: [SCHEDULE], ...(objectPackage ? { objectPackage } : {}), registry: withBoth });
+            const runId = parkedRunOf(h, HR);
+            const resumed = await h.bridgeFor('u1').resumeRun(runId, { values: { subject: 'Call back' } });
+            expect(resumed, String(objectPackage)).toMatchObject({ ok: true, action: SCHEDULE.name });
+            expect(h.engine.resume.mock.calls.map((c: unknown[]) => c[0]), String(objectPackage)).toEqual([runId]);
+        }
     });
 
     for (const [filed, what] of [[[], 'no holder\'s slot'], [[CRM, HR], 'both holders\' slots (CONTROL)']] as const) {

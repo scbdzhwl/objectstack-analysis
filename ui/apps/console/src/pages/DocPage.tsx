@@ -6,9 +6,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Navigate, useHref, useNavigate, useParams } from 'react-router-dom';
-import { AlertCircle, ChevronDown, FileQuestion, Loader2, Menu } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, Navigate, useHref, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { AlertCircle, ChevronDown, FileQuestion, Layers, Loader2, Menu } from 'lucide-react';
 import { useAdapter } from '@object-ui/app-shell';
 import { MarkdownRenderer, extractToc } from '@object-ui/plugin-markdown';
 import { useObjectTranslation } from '@object-ui/i18n';
@@ -17,12 +17,37 @@ import { DocShell } from './DocShell';
 import { BookSidebar } from './BookSidebar';
 import { DocRefusal } from './BookPage';
 import { useBookData } from './use-book-data';
-import { resolveBookTree, bookSlug, bookNamedBy, labelUncategorized, type ResolvedBook } from './book-nav';
+import { resolveBookTree, bookSlug, bookNamedBy, homeBook, labelUncategorized, type ResolvedBook } from './book-nav';
 
 interface DocItem {
   name: string;
   label?: string;
   content: string;
+}
+
+/** Scroll the heading `id` names into view, the way an in-page anchor click does; false when it is not mounted. */
+function scrollHeadingIntoView(id: string): boolean {
+  const target = document.getElementById(id);
+  target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  return target !== null;
+}
+
+/**
+ * The packages a `409 RESOURCE_CONFLICT` doc read names as holders of the
+ * name: `@objectstack/client` carries the refusal's `details.candidates` on the
+ * rejection (`{ kind: 'package', packageId }` per package). Null for any other
+ * failure, and for a refusal that names no package, so those keep their state.
+ */
+function conflictCandidates(err: unknown): string[] | null {
+  const e = err as { httpStatus?: unknown; code?: unknown; details?: { candidates?: unknown } } | null;
+  if (e?.httpStatus !== 409 || e.code !== 'RESOURCE_CONFLICT') return null;
+  const candidates = e.details?.candidates;
+  if (!Array.isArray(candidates)) return null;
+  const packageIds = candidates
+    .filter((c): c is { kind: 'package'; packageId: string } =>
+      c?.kind === 'package' && typeof c.packageId === 'string' && c.packageId !== '')
+    .map((c) => c.packageId);
+  return packageIds.length > 0 ? packageIds : null;
 }
 
 /**
@@ -41,12 +66,23 @@ interface DocItem {
  * A doc the member may not read is a different answer: the server refuses it
  * with 401 / 403 (ADR-0046 §6.7), and the page shows that refusal, with the
  * server's reason, rather than "not found" or a load failure (objectui#10188).
+ *
+ * A name two or more enabled packages ship is refused by a read that names no
+ * package, `409 RESOURCE_CONFLICT` with the holders as candidates (ADR-0150
+ * D3). Nothing picks one: the page lists the candidates, each opening that
+ * package's copy at its package address `/apps/<packageId>/docs/<name>`, where
+ * the read names the package.
  */
 export default function DocPage() {
   // Route is `/docs/:slug/:name` (`:slug` = book, `:name` = doc). `appName` is
   // the parent route's package-id segment under `/apps/:appName/docs/:slug/:name`.
   const { slug, name, appName } = useParams<{ slug?: string; name: string; appName?: string }>();
   const navigate = useNavigate();
+  // The section the URL names (`…#section`), whether typed, followed from a
+  // cross-reference, or carried through a redirect (DocsSlug, the book-name
+  // redirect below).
+  const { hash } = useLocation();
+  const articleRef = useRef<HTMLElement>(null);
   // The docs route this page is read under: the app's own docs tree inside an
   // app (ADR-0048), else the portal. Body cross-references resolve under it, so
   // a link followed from an app's doc keeps the app shell (top bar, app nav),
@@ -60,8 +96,9 @@ export default function DocPage() {
   const adapter = useAdapter();
   const { t } = useObjectTranslation();
   const [doc, setDoc] = useState<DocItem | null>(null);
-  const [state, setState] = useState<'loading' | 'ready' | 'missing' | 'refused' | 'error'>('loading');
+  const [state, setState] = useState<'loading' | 'ready' | 'missing' | 'refused' | 'conflict' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [candidates, setCandidates] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,6 +129,14 @@ export default function DocPage() {
           setState('refused');
           return;
         }
+        // Two or more packages ship this name and the read named none of
+        // them: the server names the holders, and the reader picks one.
+        const holders = conflictCandidates(err);
+        if (holders) {
+          setCandidates(holders);
+          setState('conflict');
+          return;
+        }
         // The metadata API answers 404 for unknown names — that is the
         // ADR-mandated soft-degrade path, not an error.
         if (status === 404 || /not found/i.test(err?.message ?? '')) {
@@ -116,9 +161,32 @@ export default function DocPage() {
   // ("home") rather than scrolling. Reflect the section in the URL via an
   // absolute path that ignores <base>.
   const scrollToHeading = useCallback((id: string) => {
-    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    scrollHeadingIntoView(id);
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${id}`);
   }, []);
+
+  // Landing on a URL that names a section scrolls to it once the doc renders.
+  // The body mounts after the doc loads and behind the markdown renderer's lazy
+  // boundary, so the heading may not exist yet: watch the article until it does.
+  // A new `:slug` is a new landing (the book-name redirect below keeps this page
+  // mounted and the doc loaded, but draws a new article).
+  useEffect(() => {
+    if (state !== 'ready' || doc?.name !== name || !hash) return;
+    let id: string;
+    try {
+      id = decodeURIComponent(hash.slice(1));
+    } catch {
+      return; // a malformed escape names no heading
+    }
+    if (!id || scrollHeadingIntoView(id)) return;
+    const article = articleRef.current;
+    if (!article) return;
+    const observer = new MutationObserver(() => {
+      if (scrollHeadingIntoView(id)) observer.disconnect();
+    });
+    observer.observe(article, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [state, doc, name, slug, hash]);
 
   // SPA navigation for rewritten doc-to-doc links: anchors render as plain
   // <a href="{docsHref}/...">; intercept same-app clicks so following a
@@ -184,7 +252,7 @@ export default function DocPage() {
   const namedBook = useMemo(() => (slug && !resolvedBook ? bookNamedBy(slug, books) : null), [slug, resolvedBook, books]);
 
   if (namedBook && name) {
-    return <Navigate to={`${base}/${bookSlug(namedBook)}/${name}`} replace />;
+    return <Navigate to={{ pathname: `${base}/${bookSlug(namedBook)}/${name}`, hash }} replace />;
   }
 
   if (state === 'loading') {
@@ -212,6 +280,47 @@ export default function DocPage() {
 
   if (state === 'refused') {
     return <DocRefusal name={name} message={errorMessage} />;
+  }
+
+  if (state === 'conflict') {
+    return (
+      <DocShell breadcrumb={name}>
+        <div className="mx-auto flex max-w-3xl flex-col items-center gap-3 p-10 text-center">
+          <Layers className="h-10 w-10 text-muted-foreground" />
+          <h1 className="text-lg font-semibold">
+            {t('help.docConflictTitle', { defaultValue: 'Choose a package' })}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {t('help.docConflictDescription', {
+              defaultValue: 'More than one installed package provides a document named {{name}}. Open the one you want to read.',
+              name,
+            })}
+          </p>
+          <ul
+            aria-label={t('help.docConflictCandidates', { defaultValue: 'Packages that provide this document' })}
+            className="mt-2 flex w-full max-w-md flex-col gap-2 text-left"
+          >
+            {candidates.map((packageId) => {
+              // The package as the portal names it: its home book for this doc.
+              const label = (name ? homeBook(name, books, allDocs, packageId)?.label : undefined) ?? packageId;
+              return (
+                <li key={packageId}>
+                  <Link
+                    to={{ pathname: `/apps/${packageId}/docs/${name}`, hash }}
+                    className="flex flex-col rounded-md border px-4 py-3 hover:bg-muted/50"
+                  >
+                    <span className="text-sm font-medium">{label}</span>
+                    {label !== packageId ? (
+                      <span className="text-xs text-muted-foreground">{packageId}</span>
+                    ) : null}
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </DocShell>
+    );
   }
 
   if (state === 'error') {
@@ -251,6 +360,7 @@ export default function DocPage() {
           </aside>
         ) : null}
         <article
+          ref={articleRef}
           className="min-w-0 max-w-3xl flex-1 [&_h1]:scroll-mt-24 [&_h2]:scroll-mt-24 [&_h3]:scroll-mt-24"
           onClick={onContentClick}
         >

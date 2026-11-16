@@ -37,13 +37,13 @@ import type { AutonumberToken } from '@objectstack/spec/data';
 import { aggregandColumnClass } from '@objectstack/core';
 import { StorageNameMapping, SystemObjectName } from '@objectstack/spec/system';
 import { ExistingTableAdoptionRefusal } from './existing-table-refusal.js';
-import { indexedKeyColumns, isImplicitlyIndexedReference, isUniqueScopeDeclared } from './schema-drift.js';
+import { implicitReferenceIndexes, indexedKeyColumns, isUniqueScopeDeclared } from './schema-drift.js';
 import {
   AUDIT_TIMESTAMP_COLUMNS, MYSQL_DATETIME_PRECISION, NUMERIC_SCALAR_TYPES, declaredValueShapes,
   isDeferredDdlLockWaitRefusal, isMultiValuedColumn, isNowDefaultValue,
 } from './sql-driver-top-level.js';
 import type { SqlDriver } from './sql-driver.js';
-import { isPostgresInstantColumnType } from './date-on-instant-column.js';
+import { isInstantColumnType } from './date-on-instant-column.js';
 
 /**
  * The `SqlDriver` members the bodies of {@link RotationFacet} read — every one of
@@ -139,7 +139,7 @@ export class RotationFacet {
       throw new Error(`[sql-driver] rotateShards: rotation is not supported on dialect '${this.dialectName}'`);
     }
     const tableName = StorageNameMapping.resolveTableName(objectDef as any);
-    return this.ensureRotation(tableName, objectDef, policy, nowMs);
+    return this.ensureRotation(tableName, objectDef, policy, nowMs, true);
   }
 
   /** The body of `SqlDriver#ensureShardTable`; the method's docblock there is its contract. */
@@ -462,10 +462,12 @@ export class RotationFacet {
       // ADR-0057 P2: rotation-declared telemetry is physically time-sharded —
       // the Rotator owns its DDL (shard tables + a read view under the base
       // name); the plain create/alter path below would collide with the view.
+      // Sync creates the current shard and drops none: a boot syncs before it
+      // is judged, and expiry is the lifecycle sweep's (`rotateShards`).
       const rotationPolicy = obj.lifecycle?.storage;
       if (rotationPolicy?.strategy === 'rotation' && this.supportsRotation) {
         this.tablesWithTimestamps.add(tableName);
-        await this.ensureRotation(tableName, obj, rotationPolicy);
+        await this.ensureRotation(tableName, obj, rotationPolicy, undefined, false);
         continue;
       }
 
@@ -563,11 +565,11 @@ export class RotationFacet {
 
         // [#32851] Read from the catalog just fetched, before any column below
         // is added: an added `date` column is built `date`, never an instant.
-        if (this.dialectName === 'postgres') {
-          for (const field of this.dateFields[tableName] ?? []) {
-            if (isPostgresInstantColumnType((columnInfo as Record<string, { type?: unknown }>)[field]?.type)) {
-              this.dateFieldsOnInstantColumn[tableName].add(field);
-            }
+        // [#33002] On every dialect that builds an instant column for a
+        // `datetime` field, not only Postgres.
+        for (const field of this.dateFields[tableName] ?? []) {
+          if (isInstantColumnType(this.dialectName, (columnInfo as Record<string, { type?: unknown }>)[field]?.type)) {
+            this.dateFieldsOnInstantColumn[tableName].add(field);
           }
         }
 
@@ -617,12 +619,14 @@ export class RotationFacet {
       const uniqueFields = Object.values<any>(obj.fields ?? {}).some((f) =>
         isUniqueScopeDeclared(f?.unique),
       );
-      // [#31882] An authored single-valued reference column is indexed without
-      // a declaration, so it opens this path too.
-      const referenceFields = Object.entries<any>(obj.fields ?? {}).some(([name, f]) =>
-        isImplicitlyIndexedReference(name, f, tenantField),
-      );
-      if (uniqueFields || referenceFields || (Array.isArray(declaredIndexes) && declaredIndexes.length > 0)) {
+      // [#31882 · #33695] The implicit indexes (an authored single-valued
+      // reference column, the `(created_at, id)` default order, `owner_id`) are
+      // built without a declaration, so they open this path too. The physical
+      // filter is `syncTableIndexes`' own: a key over a column this table lacks
+      // is left out there.
+      const implicitIndexes =
+        implicitReferenceIndexes({ table: tableName, fields: obj.fields ?? {}, tenantField, declaredIndexes }).length > 0;
+      if (uniqueFields || implicitIndexes || (Array.isArray(declaredIndexes) && declaredIndexes.length > 0)) {
         const colInfo = await this.knex(tableName).columnInfo();
         const physicalColumns = new Set(Object.keys(colInfo));
         await this.syncTableIndexes(

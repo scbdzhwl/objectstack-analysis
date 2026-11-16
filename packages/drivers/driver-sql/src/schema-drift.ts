@@ -696,6 +696,104 @@ export function parseHashShadowRowScope(generationExpression: string): string | 
   return m ? m[1]!.replace(/``/g, '`') : null;
 }
 
+/**
+ * The digest a #11627 hash shadow stores, as the driver writes it:
+ * `UNHEX(SHA2(<key>, 256))`, where the key is the one part bare, or every part
+ * joined by a `0x1f` separator inside `CONCAT`, and a NULL-safe part is spelled
+ * `COALESCE(<col>, '__global__')` (commit df1c75c4b).
+ *
+ * The one builder of that digest: `createHashShadowUniqueIndex` emits it, and
+ * {@link parseFunctionalRowScopedGuard} accepts a MySQL functional guard only
+ * when its digest is this one over the key parts it names. `metadata-protocol`'s
+ * package-less guards key "the driver's own hash-shadow digest" on the MySQL
+ * family, so a guard whose digest is anything else is not one of them.
+ */
+export function hashShadowDigestSql(columns: readonly string[], nullSafeColumns?: ReadonlySet<string>): string {
+  const ref = (c: string) => `\`${c.replace(/`/g, '``')}\``;
+  const part = (c: string) => (nullSafeColumns?.has(c) ? `COALESCE(${ref(c)}, '${GLOBAL_TENANT}')` : ref(c));
+  // ONE argument needs no separator, and CONCAT of one value would only add
+  // a chance to get the encoding wrong.
+  const key = columns.length === 1 ? part(columns[0]!) : `CONCAT(${columns.map(part).join(', 0x1f, ')})`;
+  return `UNHEX(SHA2(${key}, 256))`;
+}
+
+/**
+ * An expression in the spelling MySQL stores it: every blank outside a quoted
+ * run dropped and everything outside a quoted run lower-cased; a back-quoted
+ * identifier or a string literal is kept byte for byte. Only for an expression
+ * of calls, identifiers and literals (a digest), where no blank separates two
+ * words.
+ */
+function mysqlStoredDigestSpelling(sql: string): string {
+  let out = '';
+  let quote: string | null = null;
+  for (const ch of sql) {
+    if (quote !== null) {
+      out += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '`' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (/\s/.test(ch)) continue;
+    out += ch.toLowerCase();
+  }
+  return out;
+}
+
+/**
+ * `(case when (<col> is null) then <digest> end)`, as MySQL 8 stores a
+ * functional key part (`information_schema.STATISTICS.EXPRESSION`, measured on
+ * MySQL 8.0.46). See {@link parseFunctionalRowScopedGuard}.
+ */
+const FUNCTIONAL_ROW_SCOPE =
+  /^\s*\(\s*case\s+when\s+\(\s*`((?:[^`]|``)+)`\s+is\s+null\s*\)\s+then\s+([\s\S]*\S)\s+end\s*\)\s*$/i;
+
+/** A functional key part {@link parseFunctionalRowScopedGuard} reads as a partial unique. */
+export interface FunctionalRowScopedGuard {
+  /** The column whose NULL puts a row in the guard's scope. */
+  rowScope: string;
+  /** The columns the digest hashes, in key order: the guard's key. */
+  columns: string[];
+}
+
+/**
+ * The MySQL 8.0.13+ spelling of a package-less guard, read as the partial
+ * unique it is, or `null` for any other expression.
+ *
+ * `metadata-protocol`'s package-less guards (`*-packageless-index.ts`, ADR-0150
+ * D4) build on MySQL a UNIQUE index over ONE functional key part,
+ * `(CASE WHEN <scope> IS NULL THEN <digest of the key columns> END)`. UNIQUE is
+ * NULL-distinct, so every row whose `<scope>` is not NULL (a packaged row)
+ * hashes to NULL and is exempt: it is how MySQL says `UNIQUE (<key columns>)
+ * WHERE <scope> IS NULL`, the partial index the same guard is on SQLite and
+ * PostgreSQL. MariaDB, with no functional key part, spells it as a row-scoped
+ * hash shadow instead ({@link parseHashShadowRowScope}).
+ *
+ * Recognised strictly, never as "some expression over these columns": the
+ * whole stored expression must be the `case when (<col> is null) then … end`
+ * wrapper, the digest inside must be exactly what {@link hashShadowDigestSql}
+ * builds over the columns it names (plain parts only, the separator and the
+ * hash function included), and the scope column must not be one of them. So an
+ * operator's own functional index (`lower(name)`, another hash, another
+ * separator, an `IS NOT NULL` scope, a NULL-safe part) is never read as a guard.
+ */
+export function parseFunctionalRowScopedGuard(expression: string): FunctionalRowScopedGuard | null {
+  const m = FUNCTIONAL_ROW_SCOPE.exec(String(expression ?? ''));
+  if (!m) return null;
+  const rowScope = m[1]!.replace(/``/g, '`');
+  const digest = m[2]!;
+  const parts = parseHashShadowKeyParts(digest);
+  if (parts.length === 0 || parts.some((p) => p.nullSafe)) return null;
+  const columns = parts.map((p) => p.column);
+  if (columns.includes(rowScope)) return null;
+  if (mysqlStoredDigestSpelling(digest) !== mysqlStoredDigestSpelling(hashShadowDigestSql(columns))) return null;
+  return { rowScope, columns };
+}
+
 /** Minimal shape of an introspected physical column (see SqlDriver.introspectColumns). */
 export interface PhysicalColumn {
   name: string;
@@ -1123,7 +1221,13 @@ export function diffManagedTable(args: {
       // auto-reconcile (`autoMigrate: 'safe'`) still does not apply it at
       // boot. What applies it is the publish of this declaration
       // (`applyPublishedColumnChanges`, which selects exactly this entry by
-      // the explicit `false`) or `os migrate apply` — both a deliberate act.
+      // the explicit `false`), [#33724] for a sealed package object the
+      // managed install or upgrade of the package that declares it
+      // (`relaxDeclaredNotNull`, the same entry, only on the columns that
+      // package declares), or `os migrate apply` — each a deliberate act.
+      // The message names the remedy per object kind: a publish of a package
+      // object is refused (`NOT_OVERRIDABLE`), so "publish" alone was false
+      // for it.
       // An ABSENT `storage.notNull` stays the undeclared case below, unchanged.
       out.push({
         kind: 'nullability_mismatch',
@@ -1138,7 +1242,9 @@ export function diffManagedTable(args: {
         message:
           `${table}.${fieldName}: the column is NOT NULL but the metadata declares ` +
           `\`storage: { notNull: false }\`, so the database refuses every write that omits the field. ` +
-          `Relaxing the column cannot lose data: publishing the object applies it, or relax it deliberately via "os migrate apply".`,
+          `Relaxing the column cannot lose data. For an object authored in this environment, publishing the object applies it; ` +
+          `for an object a package provides (sealed, so it cannot be published here), a managed install or upgrade of that ` +
+          `package applies it ("os package install"); or relax it deliberately via "os migrate apply".`,
       });
     } else if (expectNullable && !col.nullable && field.required !== true && fieldName !== ceremonyOwnedNullability) {
       // Column STRICTER than its declaration — and the field is not even
@@ -2191,10 +2297,52 @@ const IMPLICIT_INDEX_REFERENCE_TYPES: ReadonlySet<string> = new Set(['master_det
  * The platform's own system column names. The injection pass puts
  * `created_by` / `updated_by` / `owner_id` / `owning_business_unit_id` on
  * nearly every object, and the tenant column has the registry-provisioned
- * tenant index already, so none of them is implicitly indexed (#31882 seat
- * ruling, scope B: their write cost is not paid for by a measured read).
+ * tenant index already, so none of them is implicitly indexed AS A REFERENCE
+ * (#31882 seat ruling, scope B: their write cost is not paid for by a measured
+ * read). Two system keys have that measured read now and are indexed by
+ * {@link IMPLICIT_SYSTEM_COLUMN_KEYS} instead.
  */
 const SYSTEM_COLUMN_NAMES: ReadonlySet<string> = new Set<string>(Object.values(SystemFieldName));
+
+/**
+ * The system-column keys schema sync indexes without a declaration (#33695).
+ * The maintainer's ruling 「两个都加」 supersedes scope B of the #31882 ruling
+ * for exactly these two keys, on a measured read each:
+ *
+ *   - `(created_at, id)`: the default list order, `created_at desc, id desc`.
+ *     Without it every default-ordered page sorts its whole filtered set. Both
+ *     are builtin columns, so every table the driver creates carries them.
+ *   - `(owner_id)`: the column a private-OWD read filters on. Only an object
+ *     whose fields carry it gets one: the injection pass withholds `owner_id`
+ *     from `sys_*`, `managedBy` objects and every ownership tier but `user`.
+ *
+ * Non-unique, no organization key part, named by {@link buildIndexName} like
+ * the reference indexes, so an author's own `{ fields: [...] }` over the same
+ * key converges on the same index.
+ */
+const IMPLICIT_SYSTEM_COLUMN_KEYS: ReadonlyArray<readonly string[]> = [
+  [SystemFieldName.CREATED_AT, SystemFieldName.ID],
+  [SystemFieldName.OWNER_ID],
+];
+
+/**
+ * Does this object carry every column of an {@link IMPLICIT_SYSTEM_COLUMN_KEYS}
+ * key? A builtin column always; any other only as a declared, single-valued
+ * field that stores a column. Never the tenant column.
+ */
+function carriesImplicitSystemKey(
+  key: readonly string[],
+  fields: Record<string, any>,
+  tenantField: string | null,
+): boolean {
+  return key.every((column) => {
+    if (column === tenantField) return false;
+    if (BUILTIN_COLUMNS.has(column)) return true;
+    const field = fields?.[column];
+    if (field == null || !fieldHasColumn(field)) return false;
+    return !isMultiValueField({ type: String(field.type ?? ''), multiple: field.multiple === true });
+  });
+}
 
 /**
  * Is this field a column the driver indexes without a declaration (#31882)?
@@ -2228,12 +2376,20 @@ export function isImplicitlyIndexedReference(name: string, field: any, tenantFie
  * It joins the declared set in {@link declaredIndexSet}, so the boot sync
  * creates it, `os migrate plan` reports it as `create_index` on a database
  * that lacks it, and the orphan pass never proposes dropping it.
+ *
+ * [#33695] After the reference indexes come the system-column keys
+ * ({@link IMPLICIT_SYSTEM_COLUMN_KEYS}) the object carries, each unless a
+ * declared index's key already STARTS WITH that whole key. With
+ * `physicalColumns`, a key whose columns the table does not all have is left
+ * out: an existing table the sync adopted without a `created_at` column is
+ * never given an index it cannot build.
  */
 function implicitReferenceIndexesOver(
   table: string,
   fields: Record<string, any>,
   tenantField: string | null,
   declared: ReadonlyArray<ExpectedIndex>,
+  physicalColumns?: ReadonlySet<string>,
 ): ExpectedIndex[] {
   const leading = new Set(declared.map((i) => i.columns[0]));
   const names = new Set(declared.map((i) => i.name));
@@ -2245,27 +2401,39 @@ function implicitReferenceIndexesOver(
     names.add(name);
     out.push({ name, columns: [column], unique: false });
   }
+  for (const key of IMPLICIT_SYSTEM_COLUMN_KEYS) {
+    if (!carriesImplicitSystemKey(key, fields, tenantField)) continue;
+    if (physicalColumns && !key.every((c) => physicalColumns.has(c))) continue;
+    if (declared.some((i) => key.every((c, k) => i.columns[k] === c))) continue;
+    const name = buildIndexName(table, [...key], false);
+    if (names.has(name)) continue;
+    names.add(name);
+    out.push({ name, columns: [...key], unique: false });
+  }
   return out;
 }
 
 /**
- * The implicit reference indexes for one object, against its declared set
- * (see {@link implicitReferenceIndexesOver}). The boot sync
- * (`syncTableIndexes`) adds these to what it materializes.
+ * The implicit indexes for one object, against its declared set (see
+ * {@link implicitReferenceIndexesOver}): the reference indexes (#31882) and
+ * the system-column keys (#33695). The boot sync (`syncTableIndexes`) adds
+ * these to what it materializes, passing the table's `physicalColumns` so a
+ * key over a column the table lacks is never attempted.
  */
 export function implicitReferenceIndexes(args: {
   table: string;
   fields: Record<string, any>;
   tenantField: string | null;
   declaredIndexes?: DeclaredIndexInput[];
+  physicalColumns?: ReadonlySet<string>;
 }): ExpectedIndex[] {
-  const { table, fields, tenantField, declaredIndexes } = args;
+  const { table, fields, tenantField, declaredIndexes, physicalColumns } = args;
   const declared = uniqueIndexesFromFields(table, fields, tenantField);
   for (const idx of Array.isArray(declaredIndexes) ? declaredIndexes : []) {
     const norm = normalizeDeclaredIndex(table, idx, tenantField);
     if (norm) declared.push(norm);
   }
-  return implicitReferenceIndexesOver(table, fields, tenantField, declared);
+  return implicitReferenceIndexesOver(table, fields, tenantField, declared, physicalColumns);
 }
 
 /**
@@ -2611,14 +2779,15 @@ function widenedUniqueReplacements(args: {
       // A NULL in a gained column exempts the row from the wider key, so the
       // narrower index is the only thing keeping those rows to one per
       // `narrower`. It is offered for retirement only once a partial UNIQUE on
-      // exactly `narrower`, scoped by a WHERE, already stands beside it (the
-      // activation ledger's runtime-built package-less index). Until then it is
-      // KEPT: accounted for, so the orphan arm never offers to drop it either.
-      // A gained column the table does not have yet keeps it the same way: the
-      // wider index cannot exist before its column does.
+      // exactly `narrower`, scoped by a WHERE (or by MySQL's functional
+      // row-scoped digest), already stands beside it (the activation ledger's
+      // runtime-built package-less index). Until then it is KEPT: accounted
+      // for, so the orphan arm never offers to drop it either. A gained column
+      // the table does not have yet keeps it the same way: the wider index
+      // cannot exist before its column does.
       const kept =
         gained.some((c) => absent.has(c)) ||
-        (nullable.length > 0 && !hasPartialUniqueGuard(args.physical ?? [], narrower));
+        (nullable.length > 0 && !hasPartialUniqueGuard(args.physical ?? [], narrower, nullable));
       out.push({
         column: listed.find((c) => !narrower.includes(c))!,
         legacyColumns: narrower,
@@ -2642,13 +2811,40 @@ function widenedUniqueReplacements(args: {
  * hash-shadow carrier — MariaDB's spelling of the partial guard, which stores
  * one digest column ({@link parseHashShadowRowScope}) — answers by the columns
  * it hashes, exactly as the SQLite/PostgreSQL partial index answers by its own.
+ *
+ * MySQL 8.0.13+'s spelling, a UNIQUE index over one functional key part
+ * ({@link parseFunctionalRowScopedGuard}), answers by the columns its digest
+ * hashes too, and only when its row scope is the gained column whose NULL
+ * exempts a row from the wider key: the one nullable gained column, `nullable`.
+ * With two nullable gained columns, a row NULL in the one the guard does not
+ * test escapes both keys, so no single-scope guard stands for the narrower key.
  */
-function hasPartialUniqueGuard(physical: ReadonlyArray<PhysicalIndex>, columns: readonly string[]): boolean {
+function hasPartialUniqueGuard(
+  physical: ReadonlyArray<PhysicalIndex>,
+  columns: readonly string[],
+  nullable: readonly string[],
+): boolean {
   return physical.some((p) => {
-    if (!p.unique || p.partial !== true || (p.expressions?.length ?? 0) > 0) return false;
-    const key = enforcedIndexKey(p).columns;
-    return key.length === columns.length && key.every((c, i) => c === columns[i]);
+    if (!p.unique) return false;
+    const functional = functionalRowScopedGuardOf(p);
+    if (functional !== null) {
+      return sameColumns(functional.columns, columns) && nullable.length === 1 && functional.rowScope === nullable[0];
+    }
+    if (p.partial !== true || (p.expressions?.length ?? 0) > 0) return false;
+    return sameColumns(enforcedIndexKey(p).columns, columns);
   });
+}
+
+/**
+ * The guard a physical index is when its ONLY key part is MySQL's functional
+ * row-scoped digest ({@link parseFunctionalRowScopedGuard}), else `null`. An
+ * index with any column key part, a WHERE, a hash-shadow carrier or a second
+ * expression is not that guard.
+ */
+function functionalRowScopedGuardOf(p: PhysicalIndex): FunctionalRowScopedGuard | null {
+  if (p.primary === true || p.partial === true || p.columns.length > 0 || p.shadowKey !== undefined) return null;
+  const expressions = p.expressions ?? [];
+  return expressions.length === 1 ? parseFunctionalRowScopedGuard(expressions[0]!) : null;
 }
 
 /** The same column identities, in the same key order. */

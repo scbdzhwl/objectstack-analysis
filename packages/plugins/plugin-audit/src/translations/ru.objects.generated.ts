@@ -41,10 +41,11 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "Изменение статуса администратора платформы",
           action_invocation: "Вызов действия",
           package_uninstall: "Удаление пакета",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "Импорт неуправляемого пакета",
+          credential_use: "Использование учётных данных",
+          scim_refused: "Запрос SCIM отклонён",
+          audit_signing_key_change: "Изменение ключа подписи аудита",
+          dataset_query: "Запрос к набору данных"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const ruObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

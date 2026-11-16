@@ -6,7 +6,9 @@
  * its people arrive from the organisation's identity provider. Six actions are
  * hidden while the flag is on — the four `invite_user` mirrors, `create_user`
  * and `set_user_password` — and each is offered as before when the flag is
- * off (ruling 6341690661 on #25083, Q3 A and Q4 A).
+ * off (ruling 6341690661 on #25083, Q3 A and Q4 A). `resend_invitation`
+ * rides the invite mirrors' door, so it is hidden the same way (its own
+ * block below).
  *
  * Not pinned here: a payload that omits the flag. plugin-auth's drift guard
  * holds the served boolean key set stable, and this engine faults on ANY
@@ -73,5 +75,117 @@ describe('features.cloudManaged hides the six doors that add people', () => {
 
   it.each(SIX)('%s keeps its other flag: off hides it whatever cloudManaged says', (_site, def, name) => {
     expect(offered(visibleOf(def, name), { organization: false, admin: false, cloudManaged: false })).toBe(false);
+  });
+});
+
+/**
+ * `sys_invitation.resend_invitation` is not a door that adds a person, so it
+ * is not among the six above, but it rides the same door: a resend IS a call
+ * to invite-member, which a cloud-managed environment refuses (`409
+ * RESOURCE_CONFLICT`, resends included). So it carries the same gate as the
+ * invite mirrors: hidden while managed, offered as before on a pending row
+ * (unexpired or past its `expires_at`) when the flag is off.
+ */
+describe('features.cloudManaged hides Resend Invitation, whose door it refuses', () => {
+  const resendOffered = (record: Record<string, unknown>, features: Record<string, unknown>): boolean | string => {
+    const r = celEngine.evaluate(
+      { dialect: 'cel', source: visibleOf(SysInvitation, 'resend_invitation') },
+      { record, extra: { current_user: ADMIN, user: ADMIN, ctx: { user: ADMIN }, features } },
+    );
+    if (!r.ok) return `FAULT ${r.error.message.split('\n')[0].trim()}`;
+    return typeof r.value === 'boolean' ? r.value : `NON-BOOLEAN ${JSON.stringify(r.value)}`;
+  };
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const ROWS: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ['an unexpired pending row', { id: 'inv_1', status: 'pending', email: 'b@example.com', role: 'member', expires_at: new Date(Date.now() + DAY_MS).toISOString() }],
+    ['a pending row past its expires_at', { id: 'inv_1', status: 'pending', email: 'b@example.com', role: 'member', expires_at: new Date(Date.now() - DAY_MS).toISOString() }],
+  ];
+
+  it.each(ROWS)('is hidden on %s while the environment is cloud-managed', (_row, record) => {
+    expect(resendOffered(record, { ...OTHER_FLAGS, cloudManaged: true })).toBe(false);
+  });
+
+  it.each(ROWS)('is offered on %s as before when the flag is off', (_row, record) => {
+    expect(resendOffered(record, { ...OTHER_FLAGS, cloudManaged: false })).toBe(true);
+  });
+
+  it('keeps its organization gate: off hides it whatever cloudManaged says', () => {
+    expect(resendOffered(ROWS[0][1], { organization: false, admin: true, cloudManaged: false })).toBe(false);
+  });
+});
+
+/**
+ * The managed counterparts (cloud#4465 child 1b): `add_sso_user` and
+ * `import_sso_users` add a PENDING person through plugin-auth's
+ * `admin/add-sso-user` / `admin/import-sso-users`, which answer only on a
+ * cloud-managed environment (`409 RESOURCE_CONFLICT` elsewhere) and only to a
+ * platform administrator. So each is offered exactly there: the flag on AND
+ * the standing; hidden off a managed environment, hidden while the console
+ * holds no served flag (a `false`, never a fault), and hidden from every
+ * caller below the rung, the organization owner included.
+ */
+const MANAGED_ADD: ReadonlyArray<[string, string, string]> = [
+  ['sys_user.add_sso_user', 'add_sso_user', '/api/v1/auth/admin/add-sso-user'],
+  ['sys_user.import_sso_users', 'import_sso_users', '/api/v1/auth/admin/import-sso-users'],
+];
+
+/** An organization owner: every grade the invitation mirrors ask for, without the platform-admin rung. */
+const ORG_OWNER = { id: 'u_owner', email: 'owner@example.com', positions: ['org_owner'], isPlatformAdmin: false };
+
+function offeredTo(subject: typeof ADMIN, source: string, features: Record<string, unknown>): boolean | string {
+  const r = celEngine.evaluate(
+    { dialect: 'cel', source },
+    { record: {}, extra: { current_user: subject, user: subject, ctx: { user: subject }, features } },
+  );
+  if (!r.ok) return `FAULT ${r.error.message.split('\n')[0].trim()}`;
+  return typeof r.value === 'boolean' ? r.value : `NON-BOOLEAN ${JSON.stringify(r.value)}`;
+}
+
+function declared(name: string): Record<string, unknown> {
+  const action = ((SysUser.actions ?? []) as Array<Record<string, unknown>>).find((a) => a.name === name);
+  if (!action) throw new Error(`no action ${name}`);
+  return action;
+}
+
+describe('features.cloudManaged offers the two doors that add a pending person', () => {
+  it.each(MANAGED_ADD)('%s targets its pending-person door and declares no admin-plugin gate', (_site, name, target) => {
+    const action = declared(name);
+    expect(action.type).toBe('api');
+    expect(action.target).toBe(target);
+    // The doors mount with or without the better-auth admin plugin (#33227), so
+    // an `admin` gate would hide them on the Free and Team kernels they serve.
+    expect(action.requiresFeature).toBeUndefined();
+  });
+
+  it.each(MANAGED_ADD)('%s is offered to the platform admin while the environment is cloud-managed', (_site, name) => {
+    expect(offeredTo(ADMIN, visibleOf(SysUser, name), { ...OTHER_FLAGS, cloudManaged: true })).toBe(true);
+  });
+
+  it.each(MANAGED_ADD)('%s is hidden when the flag is off: its door answers 409 there', (_site, name) => {
+    expect(offeredTo(ADMIN, visibleOf(SysUser, name), { ...OTHER_FLAGS, cloudManaged: false })).toBe(false);
+  });
+
+  it.each(MANAGED_ADD)('%s is hidden, not faulted, while no flag is served', (_site, name) => {
+    expect(offeredTo(ADMIN, visibleOf(SysUser, name), { ...OTHER_FLAGS })).toBe(false);
+  });
+
+  it.each(MANAGED_ADD)('%s is hidden from an organization owner below the platform-admin rung, even when managed', (_site, name) => {
+    expect(offeredTo(ORG_OWNER, visibleOf(SysUser, name), { ...OTHER_FLAGS, cloudManaged: true })).toBe(false);
+  });
+
+  it('on a managed environment the platform admin is offered the two pending-person doors and none of the six', () => {
+    const managed = { ...OTHER_FLAGS, cloudManaged: true };
+    const offeredSites = [...SIX.map(([site, def, name]) => [site, def, name] as const), ...MANAGED_ADD.map(([site, name]) => [site, SysUser, name] as const)]
+      .filter(([, def, name]) => offeredTo(ADMIN, visibleOf(def, name), managed) === true)
+      .map(([site]) => site);
+    expect(offeredSites).toEqual(['sys_user.add_sso_user', 'sys_user.import_sso_users']);
+  });
+
+  it('off a managed environment the platform admin is offered the six as before and neither pending-person door', () => {
+    const unmanaged = { ...OTHER_FLAGS, cloudManaged: false };
+    const offeredSites = [...SIX.map(([site, def, name]) => [site, def, name] as const), ...MANAGED_ADD.map(([site, name]) => [site, SysUser, name] as const)]
+      .filter(([, def, name]) => offeredTo(ADMIN, visibleOf(def, name), unmanaged) === true)
+      .map(([site]) => site);
+    expect(offeredSites).toEqual(SIX.map(([site]) => site));
   });
 });

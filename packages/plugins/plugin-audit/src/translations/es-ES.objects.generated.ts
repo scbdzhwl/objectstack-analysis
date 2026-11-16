@@ -41,10 +41,11 @@ export const esESObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "Cambio de acceso de administrador de plataforma",
           action_invocation: "Invocación de acción",
           package_uninstall: "Desinstalación de paquete",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "Importación de paquete no administrado",
+          credential_use: "Uso de credencial",
+          scim_refused: "Solicitud SCIM rechazada",
+          audit_signing_key_change: "Cambio de clave de firma de auditoría",
+          dataset_query: "Consulta de conjunto de datos"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const esESObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

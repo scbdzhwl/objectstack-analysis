@@ -67,9 +67,9 @@
         },
         {
           "step": 5,
-          "call": "fault arm for automation.trigger-status-contract acceptance[4]'s 503 STORE_UNAVAILABLE row, run AT that row and never up front: with a live paused showcase_reassign_wizard run (RUNID) in hand, rename the durable suspended-run table away in the boot's TELEMETRY database from a second process — node -e \"new (require('node:sqlite').DatabaseSync)('PRIMARY.telemetry.db').exec('ALTER TABLE sys_automation_run RENAME TO sys_automation_run__qa_off')\" — send one valid resume, POST /api/v1/automation/showcase_reassign_wizard/runs/RUNID/resume {\"inputs\": {\"new_assignee\": \"…\"}}, then rename it back (ALTER TABLE sys_automation_run__qa_off RENAME TO sys_automation_run)",
-          "expect": "the resume answers 503 with error.code STORE_UNAVAILABLE and a message beginning 'Durable suspended-run store unreachable for run' and ending in the driver's refusal; after the rename back, GET /api/v1/automation/showcase_reassign_wizard/runs/RUNID reads status 'paused' and the same valid resume answers 200 — the intact-suspension half of the row. ⚠️ The table lives in the TELEMETRY file beside the primary (PRIMARY.telemetry.db), not in the primary: a rename aimed at the primary answers 'no such table'. ⚠️ While the table is away every run read and write in the boot fails, so rename it back before anything else touches a run. A 404 RUN_NOT_FOUND here is the defect the row exists for: an unreadable store reported as a missing run",
-          "source": "packages/services/service-automation/src/suspended-run-store.ts#ObjectStoreSuspendedRunStore (the durable store reads and writes sys_automation_run through the data engine); packages/services/service-automation/src/run-resume.ts#loadSuspendedRunStrict and packages/services/service-automation/src/run-resume.ts#resumeInternal (a strict load that throws answers STORE_UNAVAILABLE and leaves the suspension unconsumed, never RUN_NOT_FOUND); packages/cli/src/utils/telemetry-datasource.ts#resolveTelemetryDbPath (the telemetry file is the primary's path plus `.telemetry.db`); packages/runtime/src/domains/automation.ts — the resume route's STORE_UNAVAILABLE → 503 arm"
+          "call": "fault arm for automation.trigger-status-contract acceptance[4]'s 503 STORE_UNAVAILABLE row, run AT that row and never up front: with a live paused showcase_reassign_wizard run (RUNID) in hand, rename the durable suspended-run table away in the boot's TELEMETRY database from a second process (BASE is the primary file's path without its .db suffix: a boot on file:/tmp/RUN/trigger.db keeps the table in /tmp/RUN/trigger.telemetry.db) — node -e \"new (require('node:sqlite').DatabaseSync)('BASE.telemetry.db').exec('ALTER TABLE sys_automation_run RENAME TO sys_automation_run__qa_off')\" — send one valid resume, POST /api/v1/automation/showcase_reassign_wizard/runs/RUNID/resume {\"inputs\": {\"new_assignee\": \"…\"}}, then rename it back (ALTER TABLE sys_automation_run__qa_off RENAME TO sys_automation_run)",
+          "expect": "the resume answers 503 with error.code STORE_UNAVAILABLE and a message beginning 'Durable suspended-run store unreachable for run' and ending in the driver's refusal; after the rename back, GET /api/v1/automation/showcase_reassign_wizard/runs/RUNID reads status 'paused' and the same valid resume answers 200 — the intact-suspension half of the row. ⚠️ The table lives in the TELEMETRY file beside the primary (BASE.telemetry.db: trigger.db → trigger.telemetry.db; a literal PRIMARY.db.telemetry.db is a new empty file and answers \"no such table\"), not in the primary: a rename aimed at the primary answers 'no such table'. ⚠️ While the table is away every run read and write in the boot fails, so rename it back before anything else touches a run. A 404 RUN_NOT_FOUND here is the defect the row exists for: an unreadable store reported as a missing run",
+          "source": "packages/services/service-automation/src/suspended-run-store.ts#ObjectStoreSuspendedRunStore (the durable store reads and writes sys_automation_run through the data engine); packages/services/service-automation/src/run-resume.ts#loadSuspendedRunStrict and packages/services/service-automation/src/run-resume.ts#resumeInternal (a strict load that throws answers STORE_UNAVAILABLE and leaves the suspension unconsumed, never RUN_NOT_FOUND); packages/cli/src/utils/telemetry-datasource.ts#resolveTelemetryDbPath (the telemetry file replaces the primary's .db / .sqlite / .sqlite3 suffix with .telemetry.<ext>, and appends .telemetry.db to a path with none); packages/runtime/src/domains/automation.ts — the resume route's STORE_UNAVAILABLE → 503 arm"
         },
         {
           "step": 6,
@@ -463,7 +463,7 @@
       "title": "Filtered roll-up summaries recompute only through their own filter",
       "since": "v16",
       "status": "active",
-      "revision": 7,
+      "revision": 8,
       "priority": "P1",
       "surface": "mixed",
       "personas": [
@@ -483,7 +483,7 @@
         "PATCH one line's status approved→rejected over /api/v1/data/showcase_expense_line/:id; re-read the parent and recompute again",
         "PATCH a different line's billable true→false; re-read the parent",
         "DELETE one line; re-read the parent — a delete must move every roll-up whose filter matched the deleted row, including the unfiltered total",
-        "on a writable base: POST /api/v1/packages to create a scratch base, author a parent object with a filtered summary field over a child object into it — both NAMED with the base's namespace prefix: POST /api/v1/packages derives the namespace from the id's last segment (deriveNamespaceFromPackageId: com.qa.rollup → rollup, so rollup_parent / rollup_child), and publish-drafts refuses an unprefixed object NAMESPACE_PREFIX, so the Studio edit below would never reach the persisted metadata (an active PUT /meta/object?package= saves the unprefixed name anyway — the open product defect #24547; do not read that save as a prefix-free fixture), then in Studio's visual filter editor edit that summary field's child-row filter (Studio Data › the parent object › Form › the summary field › Properties › 'Filter (rows to aggregate)'), save — the edit is a draft until 'Publish all' — publish, and re-read the persisted metadata over the meta API. ⛔ Not POST /packages/com.example.showcase/duplicate — it answers 422 DUPLICATE_SOURCE_NOT_A_BASE (#14451)"
+        "on a writable base: POST /api/v1/packages to create a scratch base, author a parent object with a filtered summary field over a child object into it — both NAMED with the base's namespace prefix: POST /api/v1/packages derives the namespace from the id's last segment (deriveNamespaceFromPackageId: com.qa.rollup → rollup, so rollup_parent / rollup_child), and publish-drafts refuses an unprefixed object NAMESPACE_PREFIX, so the Studio edit below would never reach the persisted metadata (an active PUT /meta/object?package= saves the unprefixed name anyway — the open product defect #24547; do not read that save as a prefix-free fixture), then in Studio's visual filter editor edit that summary field's child-row filter (Studio Data › the parent object › Form › the summary field › Properties › 'Filter (rows to aggregate)'), save — the edit is a draft until 'Publish all' — publish, and re-read the persisted metadata over the meta API. ⛔ Not POST /packages/com.example.showcase/duplicate — it answers 422 DUPLICATE_SOURCE_NOT_A_BASE (#14451); that refusal is reached only with the door's body { targetPackageId } (packages/runtime/src/domains/packages.ts), since a body without it answers 400 'Body { targetPackageId } is required' first"
       ],
       "acceptance": [
         {
@@ -571,6 +571,12 @@
           "date": "2026-10-27",
           "change": "steps[2] names the child's parent field and steps[6] the editor's location and its publish step. Checklist-accuracy findings of the 18.2.0 wave 2 (QA run #26456, release-18.2.0-w2-manual-browser, at 756220c4; wave anchor #25807, slice A): the runner had to find the expense_report key and the Properties panel path, and found the edit stays a draft until 'Publish all'. Re-read at base e4ba846f (expense-report.object.ts). No clause changed",
           "ref": "#25807"
+        },
+        {
+          "revision": 8,
+          "date": "2026-11-15",
+          "change": "step-text correction, no clause change. steps[6] names the duplicate door's body {targetPackageId}, without which it answers 400 before the 422 the step cites. Read from source at base 895783a1. Source records: QA record #33853 (comment 6894307378) on #33761. Batch D of the #33761 close-out, card #33966",
+          "ref": "#33984"
         }
       ]
     },
@@ -579,7 +585,7 @@
       "title": "Every demonstrable flow node type authors in the designer, executes in a run, and surfaces its step in run logs",
       "since": "v15",
       "status": "active",
-      "revision": 14,
+      "revision": 16,
       "priority": "P1",
       "surface": "mixed",
       "personas": [
@@ -622,12 +628,12 @@
       ],
       "steps": [
         "boot the showcase on its own port and DB (dogfood §0); sign in as the dev admin",
-        "GET /api/v1/automation/actions (the designer palette feed) and record the descriptor list; open the Studio flow-designer palette on a WRITABLE package and screenshot it — the stock showcase package is read-only, so its canvas offers no Add node: make a copy into its writable customization pair first, from Studio (/_console/studio/com.example.showcase/automations, open a flow, ⋯ → New similar, a new machine name and label) or over the API (POST /api/v1/automation/NAME/clone with both `name` and `label` and no `package` — a missing label is refused, field label required). The copy lands in com.example.showcase.custom switched off (ADR-0146 D4) and opens there; it is also listed on the base's rail marked 'In com.example.showcase.custom'. Delete it at teardown",
+        "GET /api/v1/automation/actions (the designer palette feed) and record the descriptor list; open the Studio flow-designer palette on a WRITABLE package and screenshot it — the stock showcase package is read-only, so its canvas offers no Add node: make a copy into its writable customization pair first, from Studio (/_console/studio/com.example.showcase/automations, open a flow, ⋯ → New similar, a new machine name and label) or over the API (POST /api/v1/automation/NAME/clone with both `name` and `label` and no `package` — a missing label is refused, field label required). The copy lands in com.example.showcase.custom switched off (ADR-0146 D4) and opens there; the base's rail lists it as 'LABEL · Added · Switched off', and 'In com.example.showcase.custom' is the chip in the opened copy's header (StudioPairItemChip, ui/packages/app-shell/src/views/studio-design/StudioRailCustomizations.tsx), not a rail marker. Delete it at teardown",
         "record_change chain: POST a showcase_task WITH `assignee` set to a real user's email, under a project that has an `owner` (the project lookup is required), with status 'in_review' — task_status_flow allows done only from in_review and does not check a create — then PATCH status→done — fires showcase_task_completed (script+save_notice+notify; the PATCH answer carries its `notice`), showcase_fan_out_notify (parallel+http), showcase_task_done_notify_owner (subflow); showcase_resilient_sync (try_catch) is not on this chain: since #32161 it runs on demand (fired as automation.flow-error-handling steps[1] fires it), because an inline push retried on a save's path is refused at publish (`flow-after-save-inline-retry`); the create also fires showcase_task_follow_up (wait) and showcase_declarative_connector_ping / showcase_mcp_connector_echo (connector_action). ⚠ The notify steps address the task's assignee and its project's owner: a task created without an assignee, or under a project without an owner, makes them fail LOUDLY for want of a recipient — a correct refusal, not a notify FAIL (QA run #23166)",
         "on-demand chain: POST /api/v1/automation/<name>/trigger for showcase_batch_reminders {params:{tasks:[…]}} (loop), showcase_inquiry_purge (get_record+decision+delete_record — seed at least one closed showcase_inquiry first), showcase_release_signoff {params:{items:[…]}} (map — its itemObject is showcase_task, so each item is record-shaped, {id, title})",
         "browser chain: run the Tasks row action showcase_bulk_reassign → showcase_reassign_wizard (screen + update_record)",
-        "approval chain: the boot already leaves a PAUSED showcase_expense_signoff run at its approval node — the showcase's approval-demo seed launches it on EXP-2001 (examples/app-showcase/src/security/seed-approval-demo.ts) — so locate the approval variant on that run; a NEW one needs a report ENTERING submitted from another status (the start condition requires previous.status != 'submitted'), e.g. PATCH EXP-2003 (draft) to submitted; PATCH a showcase_project budget above 100000 to open showcase_budget_approval, then POST /api/v1/approvals/requests/:id/revise so the run parks at the approval_revise node",
-        "webhook chain: POST /api/v1/automation/hooks/showcase_inbound_task_webhook/intake with a valid x-objectstack-signature to exercise create_record — the door accepts only the timestamped form t=UNIX_SECONDS,v1=HEX, the HMAC-SHA256 of 'T.RAW_BODY'; a body-only HMAC answers 401 INVALID_SIGNATURE (packages/triggers/trigger-api/src/api-trigger.ts verifyInboundSignature) — the flow names its secret (config.secretRef: 'SHOWCASE_WEBHOOK_SECRET'), so boot with that environment variable set to a value of your choosing and sign with it; unset, the hook answers 503",
+        "approval chain: the boot already leaves a PAUSED showcase_expense_signoff run at its approval node — the showcase's approval-demo seed launches it on EXP-2001 (examples/app-showcase/src/security/seed-approval-demo.ts) — so locate the approval variant on that run; a NEW one needs a report ENTERING submitted from another status (the start condition requires previous.status != 'submitted'), e.g. PATCH EXP-2003 (draft) to submitted; PATCH a showcase_project budget above 100000 to open showcase_budget_approval, then POST /api/v1/approvals/requests/:id/revise so the run parks at the approval_revise node. To take the EXP-2001 run to completed (acceptance[2]'s resume half), both groups of the per-group sign-off decide: the dev admin's manager slot AND the auditor persona's finance slot (auditor.demo@example.com, password showcase123: examples/app-showcase/src/security/demo-personas.ts AUDITOR_DEMO_USER; the routing in examples/app-showcase/src/security/seed-approval-demo.ts)",
+        "webhook chain: POST /api/v1/automation/hooks/showcase_inbound_task_webhook/intake with a valid x-objectstack-signature to exercise create_record — the door accepts only the timestamped form t=UNIX_SECONDS,v1=HEX, the HMAC-SHA256 of 'T.RAW_BODY'; a body-only HMAC (sha256=HEX, the HMAC-SHA256 of the raw body) answers 401 INVALID_SIGNATURE, logged as the cause 'signature-body-only', and a bare hex HMAC with no prefix is 'signature-malformed', the same 401 (packages/triggers/trigger-api/src/api-trigger.ts verifyInboundSignature) — the flow names its secret (config.secretRef: 'SHOWCASE_WEBHOOK_SECRET'), so boot with that environment variable set to a value of your choosing and sign with it; unset, the hook answers 503. The body must carry title AND project (a showcase_project id): the flow maps project as optional (has(record.project) ? … : null) but showcase_task requires it, so a body without project runs and its create_record fails 'Project is required' (QA runs #33853 and #33914)",
         "for EACH variant: GET the owning flow's runs (GET /api/v1/automation/<name>/runs + /runs/:runId) and locate a step whose nodeType equals the variant; record run id, step status, and — for suspending types — the paused-then-resumed transition",
         "screenshot the Runs panel of one composite run (showcase_project_escalation or showcase_fan_out_notify) showing the container-nested steps",
         "unknown-type probe (the late-binding contract, ruled status quo in #7545): POST /api/v1/automation a flow whose one non-start node carries type 'bogus_node' — capture the HTTP status and the server log record the registration emits, then POST /api/v1/automation/<that flow>/trigger and read GET /api/v1/automation/<that flow>/runs/:runId"
@@ -648,7 +654,7 @@
         {
           "clause": "suspending types (screen, wait, approval, approval_revise — and subflow/map when the child pauses) park the run status=paused and resume to completed",
           "oracle": "api",
-          "verify": "run detail shows status paused while parked and completed after the screen resume / timer elapse / approval decision / resubmit (see the ExecutionStatus vocabulary declared in packages/spec/src/automation/execution.zod.ts)",
+          "verify": "run detail shows status paused while parked and completed after the screen resume / timer elapse / approval decision / resubmit. Read the suspension from the RUN status: the suspending node's own step logs status 'success' while the run reads 'paused' (see the ExecutionStatus vocabulary declared in packages/spec/src/automation/execution.zod.ts)",
           "evidence": "before/after run-detail reads per suspending type"
         },
         {
@@ -666,7 +672,7 @@
         {
           "clause": "an UNKNOWN node type is late-bound, not refused — and a run reads that as PASS BY DESIGN (maintainer ruling on #7545, 2026-08-11: registration-time soft-fail on an unknown node type is the intended posture, 'deliberate late binding with a declaration — not tolerance masking an error'). The contract has four parts and ALL FOUR must hold: (1) POST /api/v1/automation with type 'bogus_node' answers 200 and really registers the flow; (2) the registration emits a located WARN whose message carries the load-bearing phrase 'no registered executor or descriptor' and names the offending flow, with unknownTypes + the FULL knownTypes vocabulary in the record's structured meta slot (#6654 — both lists ride meta, never the message text); (3) triggering that flow answers success:false carrying the NO_EXECUTOR-class message \"No executor registered for node type 'bogus_node'\"; (4) the run is recorded status 'failed', with the offending step status 'failure' and error.code 'NO_EXECUTOR'. Rationale, do not re-litigate: ADR-0018 §M1 has registerFlow() soft-validate node types against the live registry ('warn, don't hard-fail') so a flow authored against a currently-absent plugin still registers, and #4771 is the ordering incident that seam protects — the check fires only once sealNodeTypeVocabulary() has closed the vocabulary, and only for an ENABLED flow",
           "oracle": "api",
-          "verify": "from the unknown-type probe step, cite all four: the 200 + the stored flow read-back; the WARN record (message phrase + meta.unknownTypes + meta.knownTypes); the trigger response success:false + its message; and the run detail status 'failed' with the NO_EXECUTOR step. The 200 at registration is the EXPECTED answer and is never on its own a finding — the finding is any of the other three parts missing",
+          "verify": "from the unknown-type probe step, cite all four: the 200 + the stored flow read-back; the WARN record (message phrase + meta.unknownTypes + meta.knownTypes); the trigger response (HTTP 400) with success:false + its message; and the run detail status 'failed' with the NO_EXECUTOR step. The 200 at registration is the EXPECTED answer and is never on its own a finding — the finding is any of the other three parts missing",
           "evidence": "registration status + WARN log record (message and meta) + trigger response + run-detail excerpt"
         }
       ],
@@ -759,7 +765,19 @@
           "change": "steps[1] re-pointed to the Studio door (ADR-0146 D4/D11): the copy that gives the palette a writable canvas is made with Studio's New similar (or the clone door with no `package`) and lands in com.example.showcase.custom, not under Studio's ~org scope, which no longer receives a package-less clone (#28149), and Setup › Packaged Automation, the old route to it, is retired (#28785). Read at base dfbe34d887 (FlowItemMoreMenu.tsx New similar; domains/automation.ts resolveCloneTarget), with QA run #29002's measurement of where a copy lands (card note 6570476620). No clause changed",
           "ref": "#28579"
         },
-        { "revision": 14, "date": "2026-11-12", "change": "steps[2]'s record_change chain drops showcase_resilient_sync: since #32161 an inline outbound call retried in a flow that runs after a record change is refused at publish (`flow-after-save-inline-retry`; registration in packages/services/service-automation/src/flow-registration-checks.ts#validateAfterSaveInlineRetry), so the showcase runs that flow on demand (examples/app-showcase/src/automation/flows/index.ts#ResilientSyncFlow) and the PATCH no longer fires it. Its try_catch row in the node-type map is unchanged. Read from code at the PR head; not re-driven live", "ref": "#32161" }
+        { "revision": 14, "date": "2026-11-12", "change": "steps[2]'s record_change chain drops showcase_resilient_sync: since #32161 an inline outbound call retried in a flow that runs after a record change is refused at publish (`flow-after-save-inline-retry`; registration in packages/services/service-automation/src/flow-registration-checks.ts#validateAfterSaveInlineRetry), so the showcase runs that flow on demand (examples/app-showcase/src/automation/flows/index.ts#ResilientSyncFlow) and the PATCH no longer fires it. Its try_catch row in the node-type map is unchanged. Read from code at the PR head; not re-driven live", "ref": "#32161" },
+        {
+          "revision": 15,
+          "date": "2026-11-14",
+          "change": "step- and verify-text correction, no clause change. steps[1]: 'In com.example.showcase.custom' is the opened copy's header chip (StudioPairItemChip), the base rail marks the copy 'Added · Switched off'. steps[5]: EXP-2001's per-group sign-off needs the auditor persona's decision beside the admin's to complete (seed-approval-demo.ts, demo-personas.ts). steps[6]: names the body-only spelling (sha256=HEX) the door refuses and the bare-hex malformed form, both 401 (api-trigger.ts UNVERIFIED_POST_CAUSE_TEXT). acceptance[2].verify: a suspending step logs 'success' while the run is paused. acceptance[5].verify: the bogus-node trigger answers HTTP 400. Read from source at base 87330e89. Source records: QA records #33048 (comment 6846028996), #33093 (comment 6850899929) and #33096 (comment 6851700388) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
+        },
+        {
+          "revision": 16,
+          "date": "2026-11-15",
+          "change": "step-text correction, no clause change. steps[6]: the webhook body must carry project, since the flow maps it as optional while showcase_task requires it and create_record fails 'Project is required' without it. Read from source at base 895783a1. Source records: QA record #33853 (comment 6894307378) and QA record #33914 (comment 6895723718) on #33761. Batch D of the #33761 close-out, card #33966",
+          "ref": "#33984"
+        }
       ],
       "enumSource": {
         "file": "packages/spec/src/automation/flow.zod.ts",
@@ -772,7 +790,7 @@
       "title": "Every flow trigger type fires and produces a run of its bound flow; the run's trigger block records the launch event",
       "since": "v15",
       "status": "active",
-      "revision": 10,
+      "revision": 11,
       "priority": "P1",
       "surface": "mixed",
       "personas": [
@@ -782,7 +800,7 @@
         "app": "showcase",
         "requires": [
           "one seeded flow per trigger kind: record_change=showcase_urgent_task_alert (record-after-write, the only type:'record_change' flow) · autolaunched=showcase_batch_reminders (trigger route) · schedule=showcase_scheduled_digest (60s interval) · screen=showcase_reassign_wizard (Tasks row action showcase_bulk_reassign) · api=showcase_inbound_task_webhook (HMAC intake hook) · time_relative=showcase_task_due_reminder (schedule flow hosting config.timeRelative)",
-          "⚠️ the schedule and time_relative legs need package-authored scheduled work switched ON at boot: export OS_AUTOMATION_SCHEDULED_WORK_ENABLED=1 (with OS_PORT). On a default boot both showcase flows are unbound by deployment policy — the banner says \"1 flow declares a 'schedule' trigger but is NOT bound — disabled by deployment policy\" (and the same for 'time_relative'), and GET /api/v1/automation/_status reports bound:false with that reason — so no tick and no sweep ever comes, which is the policy working, not a trigger defect. ⚠️ time_relative has a second clock: showcase_task_due_reminder declares no `schedule` beside its timeRelative block, so even with the switch on it sweeps once a day at 08:00 UTC (the default cadence, packages/spec/src/automation/time-relative-trigger.zod.ts), and a run outside that minute sees no sweep. Fire the variant on a FAST CLONE, as QA run #27409 did: the same definition authored under a scratch name into a writable package (?package=, the way the area's qa-flow-status-doors recipe authors flows), with `schedule: { type: 'interval', intervalMs: 60000 }` as a sibling of `timeRelative` on the start node's config, plus a showcase_task that is not done and whose due_date falls 1 or 3 days out (offsetDays [3, 1])"
+          "⚠️ the schedule and time_relative legs need package-authored scheduled work switched ON at boot: export OS_AUTOMATION_SCHEDULED_WORK_ENABLED=1 (with OS_PORT). On a default boot both showcase flows are unbound by deployment policy — the banner says \"1 flow declares a 'schedule' trigger but is NOT bound — disabled by deployment policy\" (and the same for 'time_relative'), and GET /api/v1/automation/_status reports bound:false with that reason — so no tick and no sweep ever comes, which is the policy working, not a trigger defect. ⚠️ time_relative has a second clock: showcase_task_due_reminder declares no `schedule` beside its timeRelative block, so even with the switch on it sweeps once a day at 08:00 UTC (the default cadence, packages/spec/src/automation/time-relative-trigger.zod.ts), and a run outside that minute sees no sweep. Fire the variant on a FAST CLONE, as QA run #27409 did: the same definition authored under a scratch name into a writable package (?package=, the way the area's qa-flow-status-doors recipe authors flows) that can reach showcase_task: com.example.showcase.custom (ensure-customization first) takes it, while a fresh POST /api/v1/packages scratch package is refused 422 (timeRelative.object showcase_task outside its dependency closure) unless it declares the showcase dependency (QA run #33853), with `schedule: { type: 'interval', intervalMs: 60000 }` as a sibling of `timeRelative` on the start node's config, plus a showcase_task that is not done and whose due_date falls 1 or 3 days out (offsetDays [3, 1])"
         ]
       },
       "variants": [
@@ -916,7 +934,8 @@
           "change": "automated.ref names two pins that corroborate clauses below their oracle's layer. Checklist-accuracy finding of the 18.2.0 wave 2 (QA run #26468, release-18.2.0-w2-tier1-a, at 756220c4; wave anchor #25807, slice A): the mapping pass found inbound-hook-member.test.ts covering negative[1]'s refusal and screen-flow.spec.ts carrying acceptance[4]'s network half, neither named. No clause changed",
           "ref": "#25807"
         },
-        { "revision": 10, "date": "2026-10-31", "change": "fixtures.requires[1] says how to fire the time_relative variant inside a run. Checklist-accuracy finding of QA run #27409 (18.3.0 sweep, wave 3, Tier 1 half A, at c4c515ad; sweep anchor #27377): the stock sweep runs daily at 08:00 UTC, so the variant had to be fired on a fast clone, and the fixture line named only the scheduled-work switch. Re-read at base 488b3ed0: examples/app-showcase/src/automation/flows/index.ts TaskDueReminderFlow (no schedule on its start config), packages/spec/src/automation/time-relative-trigger.zod.ts (omitting schedule means daily at 08:00 UTC; schedule is a sibling of timeRelative). No clause changed", "ref": "#27409" }
+        { "revision": 10, "date": "2026-10-31", "change": "fixtures.requires[1] says how to fire the time_relative variant inside a run. Checklist-accuracy finding of QA run #27409 (18.3.0 sweep, wave 3, Tier 1 half A, at c4c515ad; sweep anchor #27377): the stock sweep runs daily at 08:00 UTC, so the variant had to be fired on a fast clone, and the fixture line named only the scheduled-work switch. Re-read at base 488b3ed0: examples/app-showcase/src/automation/flows/index.ts TaskDueReminderFlow (no schedule on its start config), packages/spec/src/automation/time-relative-trigger.zod.ts (omitting schedule means daily at 08:00 UTC; schedule is a sibling of timeRelative). No clause changed", "ref": "#27409" },
+        { "revision": 11, "date": "2026-11-15", "change": "fixture-text correction, no clause change. fixtures.requires[1]: the fast clone's writable package must reach showcase_task; com.example.showcase.custom takes it, and a fresh scratch package is refused 422 outside its dependency closure. Source records: QA record #33853 (comment 6894307378) on #33761. Batch D of the #33761 close-out, card #33966", "ref": "#33984" }
       ]
     },
     {
@@ -1037,7 +1056,7 @@
       "title": "Screen flow round-trip: action trigger → paused run → rendered dialog → resume with inputs → persisted write",
       "since": "v16",
       "status": "active",
-      "revision": 7,
+      "revision": 8,
       "priority": "P1",
       "surface": "browser",
       "personas": [
@@ -1053,7 +1072,7 @@
         ]
       },
       "steps": [
-        "boot the showcase on its own port and DB (dogfood §0); sign in as the dev admin; open /apps/showcase_app/showcase_task",
+        "boot the showcase on its own port and DB (dogfood §0); sign in as the dev admin; open /apps/com.example.showcase/showcase_task (the app segment is the package id; the older /apps/showcase_app/… name form is an alias the console rewrites to it: ui/packages/app-shell/src/utils/appRoute.ts appAddressSegment)",
         "start capturing POSTs to /api/v1/automation/**",
         "open the first row's action menu ([data-testid=row-action-trigger]) and click row-action-showcase_bulk_reassign",
         "record the launch POST — POST /api/v1/actions/showcase_task/showcase_bulk_reassign (the action door; see clause 1) — and GET /api/v1/automation/showcase_reassign_wizard/runs to find the new run — status must be paused",
@@ -1069,7 +1088,7 @@
         {
           "clause": "the flow action triggers a run that pauses at the screen node",
           "oracle": "network",
-          "verify": "a POST to /api/v1/actions/showcase_task/showcase_bulk_reassign (or its /:recordId form) was issued and answers the pause, and the run reads status=paused at node 'collect'. A click on a DECLARED type:'flow' action launches through the action door, POST /api/v1/actions/:object/:action, so every server-side gate the action declares applies (objectui useConsoleActionRuntime flow handler, objectui#12037); only an undeclared flow start (an inline page button, a dashboard header's synthesized action) stays on POST /api/v1/automation/:flow/trigger, so a trigger-route POST here would mean the console bypassed the declared action",
+          "verify": "a POST to /api/v1/actions/showcase_task/showcase_bulk_reassign (or its /:recordId form) was issued and answers the pause, and the run reads status=paused. The run read carries no current-node field: read the parked node from GET …/runs/:runId/screen (nodeId 'collect') and the step log, whose last step is collect. A click on a DECLARED type:'flow' action launches through the action door, POST /api/v1/actions/:object/:action, so every server-side gate the action declares applies (objectui useConsoleActionRuntime flow handler, objectui#12037); only an undeclared flow start (an inline page button, a dashboard header's synthesized action) stays on POST /api/v1/automation/:flow/trigger, so a trigger-route POST here would mean the console bypassed the declared action",
           "evidence": "network trace + run read"
         },
         {
@@ -1105,7 +1124,7 @@
         {
           "clause": "cancelling the screen dialog mid-flow closes the dialog but does NOT consume the durable suspension: the run is parked (still paused at 'collect'), not orphaned or cancelled, and remains resumable",
           "oracle": "api",
-          "verify": "FlowRunner's Cancel/close only calls onClose (setScreenFlow(null)) — it POSTs nothing, so GET /runs/:runId re-reads status=paused at node 'collect'; a follow-up GET /runs/:runId/screen still serves the contract and a POST /runs/:runId/resume with valid inputs completes it (status=completed) and the downstream update_record lands — proving the parked run was resumable, never an orphan",
+          "verify": "FlowRunner's Cancel/close only calls onClose (setScreenFlow(null)) — it POSTs nothing, so GET /runs/:runId re-reads status=paused; a follow-up GET /runs/:runId/screen still serves the contract at nodeId 'collect' and a POST /runs/:runId/resume with valid inputs completes it (status=completed) and the downstream update_record lands — proving the parked run was resumable, never an orphan",
           "evidence": "post-cancel run read (paused) + the later successful screen read/resume + task read"
         }
       ],
@@ -1170,6 +1189,12 @@
           "date": "2026-10-27",
           "change": "automated.ref names the engine pin under acceptance[5] and negative[0]. Checklist-accuracy finding of the 18.2.0 wave 2 (QA run #26468, release-18.2.0-w2-tier1-a, at 756220c4; wave anchor #25807, slice A): screen-resume-validation.test.ts covers both below the door and was not named. No clause changed",
           "ref": "#25807"
+        },
+        {
+          "revision": 8,
+          "date": "2026-11-14",
+          "change": "steps[0] opens the console under the package-id app segment (/apps/com.example.showcase/…; the app-name segment is an alias, appRoute.ts). acceptance[0] and [6] verify: the run read has no current-node field (packages/spec/src/automation/execution.zod.ts ExecutionLogSchema), so the parked node 'collect' is read from the screen contract and the step log. No clause changed. Read from source at base 87330e89. Source record: QA record #33096 (comment 6851700388) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
         }
       ]
     },
@@ -1392,7 +1417,7 @@
       "title": "connector_action dispatches through every registered connector kind, and the registry feeds the designer pickers",
       "since": "v16",
       "status": "active",
-      "revision": 5,
+      "revision": 6,
       "priority": "P2",
       "surface": "mixed",
       "personas": [
@@ -1414,7 +1439,8 @@
         "rest (plugin)",
         "slack (plugin, enumeration only)",
         "showcase_status_api (declarative rest)",
-        "showcase_mcp_tools (declarative MCP)"
+        "showcase_mcp_tools (declarative MCP)",
+        "showcase_status_openapi (declarative openapi, registry enumeration only: no stock flow dispatches it — examples/app-showcase/src/system/connectors/index.ts)"
       ],
       "steps": [
         "boot the showcase on its own port and DB (dogfood §0); sign in as the dev admin",
@@ -1422,7 +1448,7 @@
         "premise guard, before scoring any dispatch clause: confirm the boot EXPORTED OS_PORT=<port> (or SHOWCASE_SELF_URL) — read it back from the server process's environment — and that one declarative dispatch succeeds (after step 4's create, the newest showcase_declarative_connector_ping run is completed, not 'fetch failed'). ⛔ Neither surface you might reach for carries the dial address: GET /api/v1/automation/connectors exposes no baseUrl at all (its rows carry name, label, type, description, icon, origin, state, actions), and GET /api/v1/meta/connector/showcase_status_api serves the BUILD-time providerConfig.baseUrl — http://127.0.0.1:3000 on an artifact compiled without OS_PORT, even while the running instance dials the exported port",
         "POST a showcase_task carrying its required `project` (a seeded showcase_project id; without it the create answers 400 VALIDATION_FAILED 'Project is required') and status 'in_review' — fires showcase_declarative_connector_ping and showcase_mcp_connector_echo on create",
         "PATCH the task status→'done' (allowed from in_review; from the default backlog task_status_flow answers 400 invalid_transition) — fires showcase_task_completed_rest_ping",
-        "GET each of the three flows' newest run detail; capture the connector step's recorded request and response",
+        "GET each of the three flows' newest run detail; capture each run's output (the response: ping.body for the two pings) beside the node's connectorConfig.input (the request); the connector step itself records neither",
         "open one connector_action node in the Studio flow-designer; screenshot the connector → action → input pickers and capture the network call that fills them",
         "negative probe: author a scratch flow whose connectorConfig names connectorId 'nope_connector'; trigger it and read the run"
       ],
@@ -1434,9 +1460,9 @@
           "evidence": "connectors API read"
         },
         {
-          "clause": "per-variant: each dispatch-capable variant's flow run captures the outbound call AND its response — rest ping and declarative ping both record GET /api/v1/health → {status:'ok'}; the MCP echo records structuredContent.upper === 'OBJECTSTACK' on the run output",
+          "clause": "per-variant: each dispatch-capable variant's flow run completes with the connector's answer on its output — rest ping and declarative ping both carry the GET /api/v1/health answer, {status:'ok'} at ping.body.data.status inside the health envelope; the MCP echo records structuredContent.upper === 'OBJECTSTACK' on the run output",
           "oracle": "api",
-          "verify": "run-detail reads for the three flows: connector step success with the captured request/response; the MCP run's output variable echo.structuredContent.upper equals 'OBJECTSTACK'",
+          "verify": "run-detail reads for the three flows: connector step success; the step records no request or response echo (nodeId, nodeType, status, timings and metrics only: packages/services/service-automation/src/dag-traversal.ts), so read the response from the run's output variable ping.body (examples/app-showcase/src/automation/flows/index.ts) and the request from the node's connectorConfig.input; the MCP run's output variable echo.structuredContent.upper equals 'OBJECTSTACK'",
           "evidence": "three run-detail reads"
         },
         {
@@ -1495,6 +1521,12 @@
           "date": "2026-10-21",
           "change": "Respelled — fixtures.requires[2]: 'so an isolated boot without it dials 3000' → 'so a boot on its own port without it dials 3000'; fixtures.knownGaps[1]: 'so a dogfood-§0 isolated boot on a non-3000 port' → 'so a dogfood-§0 boot on its own non-3000 port'. PR #25003's out-of-scope finding (round 17 of wave anchor #24579; ACCEPT 6304389370, landing record 6304641541): 22 non-history texts in 17 items named the own-port boot or its DB with 'isolated' in other words, the phrasing round 12 found a runner reading as the `isolated` tenancy posture (OS_TENANCY_POSTURE=isolated). The new spelling names the boot or the DB by what it is, the run's own port and DB (RUNNER.md's trap-table counter: own port/DB, skill §0), and names no posture. Read at base 93e6c1a5f8. No clause changed",
           "ref": "#25018"
+        },
+        {
+          "revision": 6,
+          "date": "2026-11-14",
+          "change": "acceptance[1] (clause, verify) and steps[5]: the connector step records no request/response echo (dag-traversal.ts pushes nodeId, nodeType, status, timings, metrics), so the response is read from the run output (ping.body, with {status:'ok'} at ping.body.data.status) and the request from connectorConfig.input; variants adds showcase_status_openapi, which the registry also lists (enumeration only). No clause weakened. Read from source at base 87330e89. Source record: QA record #33096 (comment 6851700388) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
         }
       ]
     },
@@ -1503,7 +1535,7 @@
       "title": "The developer Flow Runs page triggers a run with typed inputs and drives a screen flow's pause to completion (no orphaned paused rows)",
       "since": "v16",
       "status": "active",
-      "revision": 3,
+      "revision": 4,
       "priority": "P2",
       "surface": "mixed",
       "personas": [
@@ -1519,14 +1551,14 @@
       "steps": [
         "boot the showcase on its own port and DB (dogfood §0); sign in as the dev admin",
         "open the developer Flow Runs PAGE (apps/console FlowRunsPage) at /apps/showcase_app/component/developer/flow-runs (console route developer/flow-runs) — NOT the Studio flow-designer Runs preview",
-        "typed-input run: select 'Batch Task Reminders (Loop)' (showcase_batch_reminders); the Test Run panel shows the `tasks` input as a JSON `list` textarea; paste three task-shaped objects [{id,title,owner}×3] and click 'Run Flow'",
+        "typed-input run: pick 'Batch Task Reminders (Loop)' (showcase_batch_reminders) in the flow picker, a combobox button showing the picked flow ('Notify on Task Completed (showcase_task_completed)' by default), not a native select element (ui/apps/console/src/pages/developer/FlowRunsPage.tsx FlowPicker); the Test Run panel shows the `tasks` input as a JSON `list` textarea; paste three task-shaped objects [{id,title,owner}×3] and click 'Run Flow'",
         "record the trigger POST (client.automation.execute → POST /api/v1/automation/showcase_batch_reminders/trigger) and screenshot the Result envelope; confirm a fresh row appeared in the Recent Runs panel (client.automation.listRuns → GET /automation/showcase_batch_reminders/runs)",
         "GET /api/v1/automation/showcase_batch_reminders/runs and match the newest run id/status against the panel row",
-        "screen-flow run: select 'showcase_reassign_wizard'; fill recordId (a real showcase_task id) and LEAVE new_assignee EMPTY, click 'Run Flow' — the Result reads 'Waiting for input' (status=paused) and the FlowRunner dialog opens on THIS page. ⚠ A non-empty new_assignee satisfies the screen's one required field up front (the caller supplied a declared field — packages/services/service-automation/src/screen-input-contract.ts), so the run completes WITHOUT pausing and never reaches the FlowRunner hand-off this item exists for",
+        "screen-flow run: pick showcase_reassign_wizard in the same picker; fill recordId (a real showcase_task id) and LEAVE new_assignee EMPTY, click 'Run Flow' — the Result reads 'Waiting for input' (status=paused) and the FlowRunner dialog opens on THIS page. ⚠ A non-empty new_assignee satisfies the screen's one required field up front (the caller supplied a declared field — packages/services/service-automation/src/screen-input-contract.ts), so the run completes WITHOUT pausing and never reaches the FlowRunner hand-off this item exists for",
         "screenshot the FlowRunner dialog; fill #ff-new_assignee and Submit; record the resume POST (POST /runs/:runId/resume)",
         "GET /api/v1/automation/showcase_reassign_wizard/runs — the driven run reads status=completed; count the paused rows for this flow before vs after and assert the count did not grow (the framework#3528 orphaned-paused regression)",
         "re-read the target task over /api/v1/data/showcase_task/:id — its assignee equals the submitted value",
-        "negative probe: run the screen flow again but DISMISS the FlowRunner without submitting; confirm the page offers a 'Continue run' affordance (the durable pause is reopenable) rather than losing the run"
+        "negative probe: run the screen flow again but DISMISS the FlowRunner without submitting; confirm the page offers a 'Continue run' button (the durable pause is reopenable) rather than losing the run; Continue run reopens the FlowRunner dialog on the same run, and a Submit there resumes it (200, completed)"
       ],
       "acceptance": [
         {
@@ -1594,6 +1626,12 @@
           "date": "2026-10-20",
           "change": "steps[0] respelled: 'boot showcase isolated' → 'boot the showcase on its own port and DB'. Round 12's out-of-scope finding (landing record 6287983829 on wave anchor #24579): the phrase 'showcase isolated' named the dogfood §0 own-port boot, and a runner read it as the `isolated` tenancy posture (OS_TENANCY_POSTURE=isolated). The new spelling names that boot by what it is, in RUNNER.md's own words for it (the trap table's counter: own port/DB, skill §0), and names no posture. Read at base e4d604efd3. No clause changed",
           "ref": "#25003"
+        },
+        {
+          "revision": 4,
+          "date": "2026-11-14",
+          "change": "steps[2], [5] and [9]: the flow picker is the console's shared Select (a combobox button, FlowRunsPage.tsx FlowPicker, objectui#11865), not a native select; Continue run reopens the dialog on the same run. No clause changed. Read from source at base 87330e89. Source record: QA record #33096 (comment 6851700388) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
         }
       ]
     },
@@ -1602,7 +1640,7 @@
       "title": "Toggling a record-change flow OFF is a runtime kill switch — the mutation that fired it produces no new run; ON restores firing",
       "since": "v16",
       "status": "active",
-      "revision": 4,
+      "revision": 5,
       "priority": "P2",
       "surface": "api",
       "personas": [
@@ -1616,13 +1654,13 @@
       },
       "steps": [
         "boot the showcase on its own port and DB (dogfood §0); sign in as the dev admin",
-        "baseline: POST /api/v1/data/showcase_task with priority='urgent' and its required project (a seeded showcase_project id); GET /api/v1/automation/showcase_urgent_task_alert/runs and record the run count (one new run for this create)",
+        "baseline: POST /api/v1/data/showcase_task with priority='urgent' and the fields the object requires: title, project (a seeded showcase_project id) and status (e.g. 'todo'); a key the object does not declare (e.g. subject) answers 400 INVALID_FIELD; GET /api/v1/automation/showcase_urgent_task_alert/runs and record the run count (one new run for this create)",
         "read the pre-toggle runtime state: GET /api/v1/automation/_status (getFlowRuntimeStates) — showcase_urgent_task_alert enabled=true, bound=true",
         "toggle OFF: POST /api/v1/automation/showcase_urgent_task_alert/toggle with {enabled:false} (client.automation.toggle → engine.toggleFlow → deactivateFlowTrigger)",
         "re-read /_status: enabled=false and the record_change trigger unbound (bound=false)",
-        "POST another priority='urgent' showcase_task (with its project); GET the runs list again — assert NO new run row was added (the kill switch)",
+        "POST another priority='urgent' showcase_task (title, project and status, as in step 2); GET the runs list again — assert NO new run row was added (the kill switch)",
         "toggle ON: POST /api/v1/automation/showcase_urgent_task_alert/toggle {enabled:true}; re-read /_status (enabled=true, bound=true again)",
-        "POST a third priority='urgent' showcase_task (with its project); GET the runs list — a new run row appears again",
+        "POST a third priority='urgent' showcase_task (title, project and status, as in step 2); GET the runs list — a new run row appears again",
         "negative probe (unknown flow): POST /api/v1/automation/does_not_exist/toggle {enabled:false} — expect a not-found error, no state change"
       ],
       "acceptance": [
@@ -1691,6 +1729,12 @@
           "date": "2026-10-20",
           "change": "steps[0] respelled: 'boot showcase isolated' → 'boot the showcase on its own port and DB'. Round 12's out-of-scope finding (landing record 6287983829 on wave anchor #24579): the phrase 'showcase isolated' named the dogfood §0 own-port boot, and a runner read it as the `isolated` tenancy posture (OS_TENANCY_POSTURE=isolated). The new spelling names that boot by what it is, in RUNNER.md's own words for it (the trap table's counter: own port/DB, skill §0), and names no posture. Read at base e4d604efd3. No clause changed",
           "ref": "#25003"
+        },
+        {
+          "revision": 5,
+          "date": "2026-11-14",
+          "change": "steps[1], [5] and [7] name the showcase_task fields the create needs: title, project, status (examples/app-showcase/src/data/objects/task.object.ts, all required); a subject key answers 400 INVALID_FIELD. No clause changed. Read from source at base 87330e89. Source record: QA record #33058 (comment 6846283471) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
         }
       ]
     },
@@ -1699,7 +1743,7 @@
       "title": "The flow-dispatch HTTP status contract: every never-dispatched, ran-and-failed and non-terminal outcome answers its own status + ADR-0112 code, at every door that dispatches a flow",
       "since": "v17",
       "status": "active",
-      "revision": 14,
+      "revision": 15,
       "priority": "P1",
       "surface": "api",
       "personas": ["seeded admin (admin@objectos.ai / admin123)", "org member for the resume 403 arm — created by the admin with POST /api/v1/auth/admin/create-user and past its password change (POST /api/v1/auth/change-password): a held session answers 403 PASSWORD_RESET_REQUIRED, the right status for the wrong reason"],
@@ -1723,7 +1767,7 @@
         "TRIGGER, per row, against BOTH doors — POST /api/v1/automation/:name/trigger and the legacy POST /api/v1/automation/trigger/:name (the shape client.automation.trigger() calls): a name the deployment does not hold (404 RESOURCE_NOT_FOUND: the status table's 404 row names no code of its own, so the envelope carries the spec's status default, HttpStatusErrorCodeMap in packages/spec/src/api/errors.zod.ts); qa_always_fails; the disabled showcase_urgent_task_alert; qa_no_start_node (the recipe's step 2, refused at the metadata save since #32289, so nothing holds the name: 404 RESOURCE_NOT_FOUND \"Flow 'qa_no_start_node' not found\", the 404 row, never 422 FLOW_NO_START_NODE); qa_input_schema_invalid (the recipe's step 6: 422 FLOW_INPUT_SCHEMA_INVALID); a flow that succeeds — showcase_notify_owner with {\"params\": {\"ownerId\": <a user id>, \"message\": \"…\"}} answers 200 (not showcase_resilient_sync: on demand since #32161, it calls an unroutable host, answers only after its retry ladder, and its catch region writes onto the task its `taskId` names); showcase_reassign_wizard (pauses)",
         "record for every response the HTTP status AND error.code together — neither alone is the contract, and a run that captured only the status cannot tell 409 FLOW_DISABLED from any other 409",
         "on the 400 FLOW_FAILED responses, additionally record error.details.errorMessage and error.details.summary (the flow author's own text and the per-node accounting) — they are the documented payload of that row and the console reads them from exactly there",
-        "RESUME: trigger showcase_reassign_wizard with {\"params\": {\"recordId\": <a task id>, \"objectName\": \"showcase_task\"}} to obtain a live paused runId (without recordId the valid resume fails 400 FLOW_FAILED: its update_record filters on recordId), then drive each refusal arm against POST /api/v1/automation/:name/runs/:runId/resume — a valid resume, carrying the screen's required new_assignee (200, next screen or completion) — ⚠️ a BODYLESS resume is not a valid one on the stock wizard: it answers 400 INVALID_SCREEN_INPUT, the screen-input row below; a resume missing a required screen input (400 INVALID_SCREEN_INPUT); a resume whose signal writes the engine's `$` namespace (400 INVALID_SIGNAL) — spelled {\"inputs\": {\"new_assignee\": \"…\"}, \"output\": {\"$x\": 1}}, which lands as collect.$x. The screen check runs first (refuseInvalidScreenInput before applyResumeSignal, engine.ts), so the body must also satisfy the screen's required new_assignee: {\"output\": {\"$x\": 1}} alone answers 400 INVALID_SCREEN_INPUT (QA run #24779), as does a `$` key inside `inputs`; and a body carrying both `inputs` and `variables` is refused 400 VALIDATION_FAILED since #24594; a resume while the durable run store is unreadable (503 STORE_UNAVAILABLE) — the qa-flow-status-doors recipe's step 5, the table renamed away for that one resume and back before the re-read; a resume of an unknown runId (404 RUN_NOT_FOUND); a resume as the member persona, neither the trigger identity nor a resumeAuthority holder (403 PERMISSION_DENIED); and 409 RESUME_IN_PROGRESS, reproducible with a scratch screen flow start → screen(collect, required x) → http GET a local delay server (e.g. http://127.0.0.1:FREE-PORT/slow?s=6) → screen(collect2, required y) → end: send a second resume while the first is inside the http node (the engine's `resuming` guard holds for the whole continuation), and the second screen makes the intact suspension and a later resume observable (QA run #24596)",
+        "RESUME: trigger showcase_reassign_wizard with {\"params\": {\"recordId\": <a task id>, \"objectName\": \"showcase_task\"}} to obtain a live paused runId (without recordId the valid resume fails 400 FLOW_FAILED: its update_record filters on recordId), then drive each refusal arm against POST /api/v1/automation/:name/runs/:runId/resume — a valid resume, carrying the screen's required new_assignee (200, next screen or completion) — ⚠️ a BODYLESS resume is not a valid one on the stock wizard: it answers 400 INVALID_SCREEN_INPUT, the screen-input row below; a resume missing a required screen input (400 INVALID_SCREEN_INPUT); a resume whose signal writes the engine's `$` namespace (400 INVALID_SIGNAL) — spelled {\"inputs\": {\"new_assignee\": \"…\"}, \"output\": {\"$x\": 1}}, which lands as collect.$x. The screen check runs first (refuseInvalidScreenInput before applyResumeSignal, engine.ts), so the body must also satisfy the screen's required new_assignee: {\"output\": {\"$x\": 1}} alone answers 400 INVALID_SCREEN_INPUT (QA run #24779), as does a `$` key inside `inputs`; and a body carrying both `inputs` and `variables` is refused 400 VALIDATION_FAILED since #24594; a resume while the durable run store is unreadable (503 STORE_UNAVAILABLE) — the qa-flow-status-doors recipe's step 5, the table renamed away for that one resume and back before the re-read; a resume of an unknown runId (404 RUN_NOT_FOUND); a resume as the member persona, neither the trigger identity nor a resumeAuthority holder (403 PERMISSION_DENIED); and 409 RESUME_IN_PROGRESS, reproducible with a scratch screen flow start → screen(collect, required x) → http GET a local delay server (e.g. http://127.0.0.1:FREE-PORT/slow?s=6) → screen(collect2, required y) → end: send a second resume while the first is inside the http node (the engine's `resuming` guard holds for the whole continuation), and the second screen makes the intact suspension and a later resume observable (QA run #24596); and 409 RESUME_CHILD_PENDING, stageable with two runtime flows registered through POST /api/v1/automation: a parent whose `map` node runs an item flow that pauses at a screen — resume the PARENT's run while an item's child run is still paused, and the answer names that child run id to resume instead, nothing moving (packages/services/service-automation/src/run-resume.ts#MAP_ITEM_PENDING_REFUSAL_CODE; QA run #32949)",
         "after each RETRYABLE refusal, re-read the run and confirm the suspension is STILL PAUSED and a later valid resume still works — 'the refusal left the suspension intact' is half of what those arms mean, and a status alone does not show it",
         "cross-door: dispatch a disabled flow through POST /api/v1/actions/... with a type:'flow' action and through a declared type:'flow' endpoint, and record what each answers. No stock flow is reachable from all three doors, so each door takes its own: showcase_reassign_wizard through its declared action (POST /api/v1/actions/showcase_task/showcase_bulk_reassign), and showcase_inquiry_purge through its endpoint (POST /api/v1/apps/showcase/inquiries/purge, examples/app-showcase/src/system/apis/index.ts) — toggle each OFF first and back ON in teardown. The /actions door's 400 FLOW_FAILED row needs a type:'flow' action targeting qa_always_fails, which stock does not declare (its 422 FLOW_NO_START_NODE row is unreachable since PR #32273: packages/runtime/src/action-execution.ts#dispatchFlowAction probes the registry first and answers 404 for a flow the engine refused): author one into the recipe's package (PUT /api/v1/meta/action/NAME?package=com.objectstack.qa.automation, the route QA run #25817 names) — the qa-flow-status-doors recipe does not carry that step. ⚠️ showcase_inquiry_purge really deletes: a dispatch that is NOT refused runs its predicate delete_record (multi: true) over every showcase_inquiry whose status is 'closed' (examples/app-showcase/src/automation/flows/index.ts). POST the purge endpoint only while the flow is toggled OFF, never again after teardown re-enables it, and run this leg on the run's own throwaway DB",
         "SAVE a start-less flow at the automation door: POST /api/v1/automation with the recipe's step 2 body renamed qa_no_start_node_save (a name nothing stored), record the status, error.code and message, then GET /api/v1/automation/qa_no_start_node_save; and the recipe's step 2 PUT, recording its status and the rule it names",
@@ -1761,10 +1805,10 @@
           "evidence": "per-arm response + the post-refusal run state + the successful later resume"
         },
         {
-          "clause": "the two STALE-suspension exits are reported as terminal 404 RUN_NOT_FOUND, not as a business rejection — the flow was deregistered, or the node the run was parked on was edited away under a live pause",
+          "clause": "a STALE suspension, whose flow was deregistered under a live pause, is reported as terminal 404 RUN_NOT_FOUND, not as a business rejection; a flow EDITED under a live pause is not stale: since #28405 (ADR-0146 D9 item 4) the resume runs on the body the run started on, so editing the paused node away resumes with 200",
           "oracle": "api",
-          "verify": "obtain a live pause, then remove the flow (or edit the paused node away) and resume: 404 RUN_NOT_FOUND, with the engine's message naming WHICH of the two it was. The engine classifies both (#8684, producer-first) — the route must not be sniffing summary/durationMs to tell the classes apart",
-          "evidence": "the 404 response + its message"
+          "verify": "obtain a live pause, then remove the flow and resume: 404 RUN_NOT_FOUND, the engine's message reading \"Flow 'NAME' not found for run 'RUNID'\". On a second live pause, publish an edit of the flow that removes the paused node and resume: 200, the run continuing on its pinned body (packages/services/service-automation/src/run-resume.ts#resolveResumeTarget recovers the started-on body by its flowChecksum, from the armed definition, the metadata history or a body this process registered). The \"Suspended node … no longer exists\" cause is reached only by a run with no recorded checksum or one whose pinned body is recoverable nowhere (a code package upgraded under the run), which no stock fixture stages: ⛔ never score that arm from a metadata edit. The engine classifies the exits (#8684, producer-first) — the route must not be sniffing summary/durationMs to tell the classes apart",
+          "evidence": "the deregistered arm's 404 response + its message, and the edited arm's 200 resume"
         },
         {
           "clause": "the SDK surfaces the contract rather than flattening it: client.automation.trigger()/.execute() and .resume() REJECT on every non-2xx, and the rejection carries httpStatus and code",
@@ -1883,7 +1927,13 @@
         { "revision": 11, "date": "2026-10-31", "change": "The 422 FLOW_INPUT_SCHEMA_INVALID row gains its recipe, and steps[7] warns about the purge endpoint. Checklist-accuracy findings of QA run #27392 (18.3.0 sweep, wave 3, at c4c515ad; sweep anchor #27377). (1) knownGaps[1] said the row had no stock trigger and scored not-run, but the run staged it inside the qa-flow-status-doors package and read 422 at both trigger routes and /actions: the recipe gains step 6 (qa_input_schema_invalid), steps[2] drives it, provisioning.why names it, and the knownGaps entry is dropped. (2) Once re-enabled, showcase_inquiry_purge deletes every closed inquiry, so the cross-door leg now says to drive it only while the flow is off and on a throwaway DB. Re-read at base 488b3ed0: packages/services/service-automation/src/engine.ts validateNodeInputSchemas, examples/app-showcase/src/automation/flows/index.ts showcase_inquiry_purge (delete_record, multi: true), examples/app-showcase/src/system/apis/index.ts InquiryPurgeEndpoint. acceptance[0] is unchanged, and its 422 FLOW_INPUT_SCHEMA_INVALID row is now scorable on the recipe", "ref": "#27392" },
         { "revision": 12, "date": "2026-11-10", "change": "The 422 FLOW_NO_START_NODE row is re-pointed to what a start-less flow meets since PR #32273 (merged 1ce6e0f0), which refuses it at registration (#32290, stale spec; out-of-scope finding of the #32142 card, confirmed by contract review 6772843445 ③). acceptance[0] scores the four reachable refusal rows plus 200 and says the 422 FLOW_NO_START_NODE row is unreachable and unscored, with qa_no_start_node now on the 404 row at both trigger routes; new acceptance[7] and steps[8] read the save at POST /api/v1/automation (400 VALIDATION_FAILED, nothing kept) and the metadata read's `registration: refused`; steps[2], steps[7], provisioning.why, the 409-vs-422 negative, two variants and source follow; the recipe's step 2 expect, title, why and knownGaps[1] say the flow is stored but never armed. Keep-or-retire of FLOW_NO_START_NODE stays an open ruling and #32142 stays open; neither is decided here. Read from code at 351c22c9: packages/services/service-automation/src/flow-registration-checks.ts#validateStartNode (first in registrationChecks); packages/runtime/src/domains/automation.ts#respondToFlowTrigger (registry probe, 404) and #registerAndSaveFlow (400); packages/runtime/src/action-execution.ts#dispatchFlowAction (404); packages/services/service-automation/src/plugin.ts#syncMutatedFlows (recordFlowRefusal); packages/metadata-protocol/src/protocol-automation-flow-reads.ts#resolveFlowRegistrationReader. Not re-driven live", "ref": "#32290" },
         { "revision": 13, "date": "2026-11-10", "change": "The start-less probe is re-pointed to the metadata save door's refusal: since #32289 (PR #32340) the runtime authoring gate refuses a live flow with no start node (`flow-start-node-missing`, packages/lint/src/lint-flow-patterns.ts#scanStartNodeMissing), so the recipe's step 2 PUT answers 422 INVALID_METADATA and stores nothing, as that step's own text asked once #32289 landed. The recipe's step 2 expect, title, why and knownGaps[1], and this item's provisioning.why, steps[2], steps[8], acceptance[0] and acceptance[7] follow: qa_no_start_node is now an unheld name at both trigger routes (still the 404 row), and acceptance[7] reads the 422 save in place of the stored row's `registration`. A row stored before #32289 is still refused at registration, pinned in packages/services/service-automation/src/flow-refused-registration-read.integration.test.ts. Read from code at the PR head; not re-driven live", "ref": "#32289" },
-        { "revision": 14, "date": "2026-11-12", "change": "steps[2]'s note on why showcase_resilient_sync is not the success probe is re-worded: since #32161 the flow runs on demand with no record condition (examples/app-showcase/src/automation/flows/index.ts#ResilientSyncFlow), so the old reason (a CEL condition answering a bare trigger 400) no longer holds; it is still no clean success probe, for the reasons the step now names. No clause changed. Read from code at the PR head; not re-driven live", "ref": "#32161" }
+        { "revision": 14, "date": "2026-11-12", "change": "steps[2]'s note on why showcase_resilient_sync is not the success probe is re-worded: since #32161 the flow runs on demand with no record condition (examples/app-showcase/src/automation/flows/index.ts#ResilientSyncFlow), so the old reason (a CEL condition answering a bare trigger 400) no longer holds; it is still no clean success probe, for the reasons the step now names. No clause changed. Read from code at the PR head; not re-driven live", "ref": "#32161" },
+        {
+          "revision": 15,
+          "date": "2026-11-14",
+          "change": "acceptance[5] re-pointed: only the deregistered-flow arm answers 404 RUN_NOT_FOUND; editing the paused node away resumes with 200 on the run's pinned body since #28405 (packages/services/service-automation/src/run-resume.ts#resolveResumeTarget), and the node-gone cause is named as unstageable from a metadata edit. steps[5] adds how to stage 409 RESUME_CHILD_PENDING (a map parent over a pausing screen item flow; run-resume.ts MAP_ITEM_PENDING_REFUSAL_CODE), an arm acceptance[4] already lists. The qa-flow-status-doors recipe's step 5 (this item's 503 arm) now names the telemetry file as the primary's path with its .db suffix replaced (trigger.db → trigger.telemetry.db, packages/cli/src/utils/telemetry-datasource.ts#resolveTelemetryDbPath); its PRIMARY.telemetry.db spelling read literally named a file that does not exist. Read from source at base 87330e89. Source records: QA records #32949, #33025 (comment 6844741021), #33081 (comment 6850173588) and #33092 (comment 6850793622) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
+        }
       ]
     },
     {
@@ -2162,7 +2212,7 @@
       "title": "POST /automation/:name/clone (Studio's New similar): whole-definition copy mutating exactly name/label/status, written switched off (status obsolete) into a package — the base's .custom pair when `package` is omitted —, protection envelope dropped, no ancestry, notice verbatim, 400/404/409/422 refusal arms — and the honest clause: the copy survives a restart and reaches Studio",
       "since": "v17",
       "status": "active",
-      "revision": 12,
+      "revision": 13,
       "priority": "P1",
       "surface": "mixed",
       "personas": [
@@ -2196,7 +2246,7 @@
           "evidence": "the four 400 bodies with their details arrays"
         },
         {
-          "clause": "the copy is whole-definition with exactly name/label/status mutated, the protection envelope and read decorations dropped, and NO ancestry: every other key of the copy deep-equals the source; none of the 11 FLOW_CLONE_DROPPED_KEYS (_diagnostics, _draft, _lock, _lockReason, _lockSource, _provenance, _packageId, _packageVersion, _lockDocsUrl, protection, overrides) is present on the copy; no clonedFrom-shaped key exists in the response or the stored definition. The response names where the copy LIVES (packageId com.example.showcase.custom when `package` was omitted), which is not ancestry",
+          "clause": "the copy is whole-definition with exactly name/label/status mutated, the protection envelope and read decorations dropped, and NO ancestry: every other key of the copy deep-equals the source; none of the 11 FLOW_CLONE_DROPPED_KEYS (_diagnostics, _draft, _lock, _lockReason, _lockSource, _provenance, _packageId, _packageVersion, _lockDocsUrl, protection, overrides) is carried over from the source onto the copy (read on the clone response and the stored definition; a later GET /automation/COPY decorates _packageId naming the copy's own holder, com.example.showcase.custom, which is a read decoration naming where it lives, not a carried key); no clonedFrom-shaped key exists in the response or the stored definition. The response names where the copy LIVES (packageId com.example.showcase.custom when `package` was omitted), which is not ancestry",
           "oracle": "api",
           "verify": "the step-4 diff: differences are exactly {name, label, status:'obsolete'} (FLOW_CLONE_MUTATED_FIELDS and FLOW_CLONE_STATUS, flow-clone.ts — 'obsolete' since #28149, ADR-0146 D4) plus the ABSENCE of the dropped keys (flow-clone.ts — METADATA_READ_DECORATIONS + MetadataProtectionFields, derived, plus the package author's `protection` block, named (#23120), plus OverrideDeclarationFields (`overrides`, ADR-0146 D2): 2+7+1+1=11 at base f68b47ca; count them from the source at run time rather than trusting this line). The step-3 response carries data.packageId 'com.example.showcase.custom' (domains/automation.ts, the clone arm's deps.success). A missing facet (nodes, edges, variables, runAs, retry…) is the #11703 param-list failure shape; a surviving _packageId or _lock defeats the feature (the copy would claim the base's package or be locked); any ancestry key violates amendment ruling 2 / §9",
           "evidence": "the key-by-key diff + the dropped-keys absence check + the response's packageId"
@@ -2297,6 +2347,12 @@
           "date": "2026-11-04",
           "change": "acceptance[1] (clause and verify), acceptance[6] (clause and verify) and steps[7] corrected from QA run #29890 (W5-FAIL, at 589049b0). FLOW_CLONE_DROPPED_KEYS now also drops OverrideDeclarationFields (`overrides`), 11 keys (flow-clone.ts). On the base's rail the copy carries the row mark 'Added'; 'In com.example.showcase.custom' is the designer header's chip (#29693). Read at base f68b47ca",
           "ref": "#29906"
+        },
+        {
+          "revision": 13,
+          "date": "2026-11-15",
+          "change": "clause wording corrected, not narrowed. acceptance[1]: the dropped keys are judged on the clone response and the stored definition; a later GET of the copy decorates _packageId naming the copy's own holder, which is a read decoration, not a key carried from the source. Source records: QA record #33853 (comment 6894307378) on #33761. Batch D of the #33761 close-out, card #33966",
+          "ref": "#33984"
         }
       ]
     },
@@ -2305,7 +2361,7 @@
       "title": "The packaged-automation doors after ADR-0146 D4/D11: Setup nav serves Packaged actions (the retired flows page's bookmark lands in Studio), Studio's Automations pillar lists the packaged flows, its ledger switch persists, New similar is offered on flows only, no lineage surface, server refusals verbatim in role=alert",
       "since": "v17",
       "status": "active",
-      "revision": 12,
+      "revision": 13,
       "priority": "P1",
       "surface": "browser",
       "personas": [
@@ -2342,13 +2398,13 @@
         {
           "clause": "the Setup navigation serves the Packaged actions entry and no longer the retired flows page: the served setup app carries the type:'component' item componentRef 'automation:packaged-actions' and none naming 'automation:packaged', clicking the sidebar entry lands on Setup › Packaged actions, and the retired page's bookmark lands in Studio (the cross-package flow list, or the named package's Automations pillar), never on a dead Setup page",
           "oracle": "network",
-          "verify": "the GET /api/v1/meta/app?id=setup body carries id 'nav_packaged_actions', type 'component', componentRef 'automation:packaged-actions', label 'Packaged Actions' (setup-nav.contributions.ts), and nav_packaged_automation occurs 0 times (tombstoned in setup-nav-dead-key-tombstone.test.ts) — AND the sidebar click navigates to the page. The entry carries no requiresService and no requiredPermissions, as its predecessor did (the write doors gate server-side) — do not 'fix' either. The bookmark legs are the navigation trace of steps[1]: /component/automation/packaged → /studio/~all/metadata/flow with no ?package=, → /studio/com.example.showcase/automations with one (packagedAutomationStudioPath; pinned by AppContent.setupMetadataStudio-28578.test.tsx). ⛔ A typed-URL landing does not tick the sidebar half: each repo half pins only itself (setup-packaged-actions-nav.test.ts; PackagedActionsPage.navContribution.test.tsx), and the live served body + real sidebar click is the only observation that crosses the seam",
+          "verify": "the GET /api/v1/meta/app?id=setup body carries id 'nav_packaged_actions', type 'component', componentRef 'automation:packaged-actions', label 'Packaged Actions' (setup-nav.contributions.ts), and nav_packaged_automation occurs 0 times (tombstoned in setup-nav-dead-key-tombstone.test.ts) — AND the sidebar click navigates to the page. The entry carries no requiresService and no requiredPermissions, as its predecessor did (the write doors gate server-side) — do not 'fix' either; it does carry visible: \"current_user.can('sys_metadata_activation', 'read')\" (#33224), the audience of its page's own ledger read, so a member who cannot read sys_metadata_activation is neither shown the entry nor landed on it. The bookmark legs are the navigation trace of steps[1]: /component/automation/packaged → /studio/~all/metadata/flow with no ?package=, → /studio/com.example.showcase/automations with one (packagedAutomationStudioPath; pinned by AppContent.setupMetadataStudio-28578.test.tsx). ⛔ A typed-URL landing does not tick the sidebar half: each repo half pins only itself (setup-packaged-actions-nav.test.ts; PackagedActionsPage.navContribution.test.tsx), and the live served body + real sidebar click is the only observation that crosses the seam",
           "evidence": "the meta/app body + sidebar screenshot + the two bookmark navigation traces"
         },
         {
-          "clause": "inventory: Studio's Automations rail on the read-only showcase package lists exactly that package's packaged flows, each with a row in GET /api/v1/automation/_status, and an open flow's ledger switch is checked by default (an obsolete-status flow excepted: the engine holds it disabled). A flow the customization pair adds appears only marked 'In com.example.showcase.custom' (engine.studio.customize.addedIn), never as one of the base's flows. This clause judges the flag, not the reading: on a default boot the two policy-unbound schedule flows keep a checked switch whose data-reading is 'not-running' (steps[3]), and that does not fail this clause",
+          "clause": "inventory: Studio's Automations rail on the read-only showcase package lists exactly that package's packaged flows, each with a row in GET /api/v1/automation/_status, and an open flow's ledger switch is checked by default (an obsolete-status flow excepted: the engine holds it disabled). A flow the customization pair adds appears only with the rail row mark 'Added' (engine.customizationMark.added), never as one of the base's flows; 'In com.example.showcase.custom' (engine.studio.customize.addedIn) is the opened copy's header chip (StudioPairItemChip), not the rail row. This clause judges the flag, not the reading: on a default boot the two policy-unbound schedule flows keep a checked switch whose data-reading is 'not-running' (steps[3]), and that does not fail this clause",
           "oracle": "dom",
-          "verify": "rail rows vs the _status rows filtered to the package: same names, none missing, none extra (a copy from steps[5] shows only with its 'In PAIR' mark). For each opened flow, auto-ledger-switch aria-checked equals the enabled field of its _status row (StudioDesignSurface.tsx: ledgerRow from flowStatus, FlowLedgerSwitch checked), which the engine sets false only for an obsolete or invalid status or a ledger toggle (isFlowEnabled, service-automation engine.ts). OS_AUTOMATION_SCHEDULED_WORK_ENABLED moves the reading, never the flag. ⛔ Do not score a 'not-running' reading as a switch reading Off, nor read a checked switch as a flow that runs. QA run #29124 read 32 flows on the rail and in _status",
+          "verify": "rail rows vs the _status rows filtered to the package: same names, none missing, none extra (a copy from steps[5] shows only with its 'Added' row mark). For each opened flow, auto-ledger-switch aria-checked equals the enabled field of its _status row (StudioDesignSurface.tsx: ledgerRow from flowStatus, FlowLedgerSwitch checked), which the engine sets false only for an obsolete or invalid status or a ledger toggle (isFlowEnabled, service-automation engine.ts). OS_AUTOMATION_SCHEDULED_WORK_ENABLED moves the reading, never the flag. ⛔ Do not score a 'not-running' reading as a switch reading Off, nor read a checked switch as a flow that runs. QA run #29124 read 32 flows on the rail and in _status",
           "evidence": "rail list vs the two API reads, side by side, plus the switch's aria-checked and data-reading per flow opened"
         },
         {
@@ -2488,6 +2544,12 @@
           "date": "2026-11-04",
           "change": "steps[3] and acceptance[6].verify corrected from QA run #29890 (W5-FAIL, at 589049b0): the ledger switch readings are 'Switched on / off for this deployment' (engine.studio.auto.ledger.*, respelled by #29784 / #29841), and a New similar copy on the read-only base opens on the base's pillar URL, selected in its rail, not on a pair URL. Read at base f68b47ca",
           "ref": "#29906"
+        },
+        {
+          "revision": 13,
+          "date": "2026-11-15",
+          "change": "clause wording corrected, not narrowed, and verify-text correction. acceptance[1] (clause and verify): a pair-added flow carries the rail row mark 'Added' (engine.customizationMark.added); 'In com.example.showcase.custom' is the opened copy's header chip. acceptance[0].verify names the entry's visible gate, current_user.can('sys_metadata_activation', 'read') (setup-nav.contributions.ts). Read from source at base 895783a1. Source records: QA record #33853 (comment 6894307378) on #33761. Batch D of the #33761 close-out, card #33966",
+          "ref": "#33984"
         }
       ]
     },
@@ -2496,7 +2558,7 @@
       "title": "A stored flow the engine refused to register no longer reads as running: GET /meta/flow/:name carries registration {state:\"refused\", reason} beside the authored status, the list carries registrations keyed by name, and a good flow reads registered",
       "since": "v18",
       "status": "active",
-      "revision": 2,
+      "revision": 3,
       "priority": "P1",
       "surface": "api",
       "personas": [
@@ -2518,7 +2580,7 @@
         {
           "clause": "the registration verdict on the flow read and list — the permanent pins pass at the run subject sha (RUNNER rule 6: cite their output, never re-derive by hand)",
           "oracle": "test",
-          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
+          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --reporter=tree --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
           "evidence": "the vitest summary line per pin file, with the package name and the subject sha"
         },
         {
@@ -2555,6 +2617,12 @@
           "date": "2026-10-19",
           "change": "fixtures.requires[1] names a refused flow that can be stored — checklist-accuracy finding of the 18.0 QA sweep (QA run #24545, automation.flow-registration-verdict-on-read fixtures; wave anchor #24579 §3): the suggested contract-refused builtin node config is refused at parse, and a refused re-registration keeps reading registered. Re-derived at base 9a7838edf5 (packages/services/service-automation/src/engine.ts: recordFlowRefusal ignores a name the engine holds; registerFlow refuses an api flow with no secret after the parse accepts it). Left alone from the same finding: the OS_METADATA_WRITABLE=flow half (flow declares allowRuntimeCreate: true, so a new flow needs no hatch). No clause changed",
           "ref": "#24649"
+        },
+        {
+          "revision": 3,
+          "date": "2026-11-15",
+          "change": "acceptance[0].verify names `--reporter=tree`, the reporter that prints the one line per pin file this is scored on: in a runner's non-TTY shell vitest's default reporter prints the run's totals only (RUNNER.md's environment facts; QA run #33784's note 10, comment 6893243542). No clause or threshold changed. Card #33969",
+          "ref": "#34068"
         }
       ]
     },
@@ -2563,7 +2631,7 @@
       "title": "Flow authoring contract on v18, refused at `os validate` — and at PUT /meta/flow for every flow-body arm but the CEL root scope, which only `os validate` judges: single-brace {…} value tokens (CEL only; text slots use {{ }}), $-prefixed bound variable names, builtin node config keys/values the executor does not declare, dangling or repeated edges, `record`/`user.id` roots a flow cannot bind, retryPolicy.maxRetry, and an anonymous endpoint targeting a runAs:\"system\" flow",
       "since": "v18",
       "status": "active",
-      "revision": 5,
+      "revision": 6,
       "priority": "P1",
       "surface": "cli",
       "personas": [
@@ -2586,7 +2654,7 @@
         {
           "clause": "every flow authoring refusal at the spec and lint layers — the permanent pins pass at the run subject sha (RUNNER rule 6: cite their output, never re-derive by hand)",
           "oracle": "test",
-          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
+          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --reporter=tree --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
           "evidence": "the vitest summary line per pin file, with the package name and the subject sha"
         },
         {
@@ -2647,7 +2715,8 @@
           "change": "automated.ref narrowed per clause — checklist-accuracy finding C8 of QA run #24786 (wave anchor #24579 round 12, round 6's theme-B rule): the ref listed nine spec and lint unit pins with no clause qualifier, though acceptance[1]–[3] need the CLI or the PUT door. The pins are acceptance[0]'s own subject, so `automated` stays, narrowed to it. No clause changed",
           "ref": "#24824"
         },
-        { "revision": 5, "date": "2026-10-31", "change": "acceptance[2] and steps[1] say the endpoint arm needs a tenant flow name. Checklist-accuracy finding of QA run #27409 (18.3.0 sweep, wave 3, Tier 1 half A, at c4c515ad; sweep anchor #27377): a PUT of the runAs:'system' body under a packaged flow's name answered 403 NOT_OVERRIDABLE before the door judged it, so the arm never reached its 422 until the endpoint named a flow no package ships. Re-read at base 488b3ed0: packages/metadata-protocol/src/protocol.ts (a package-shipped item answers NOT_OVERRIDABLE at the meta write door). The 422 assertion is unchanged", "ref": "#27409" }
+        { "revision": 5, "date": "2026-10-31", "change": "acceptance[2] and steps[1] say the endpoint arm needs a tenant flow name. Checklist-accuracy finding of QA run #27409 (18.3.0 sweep, wave 3, Tier 1 half A, at c4c515ad; sweep anchor #27377): a PUT of the runAs:'system' body under a packaged flow's name answered 403 NOT_OVERRIDABLE before the door judged it, so the arm never reached its 422 until the endpoint named a flow no package ships. Re-read at base 488b3ed0: packages/metadata-protocol/src/protocol.ts (a package-shipped item answers NOT_OVERRIDABLE at the meta write door). The 422 assertion is unchanged", "ref": "#27409" },
+        { "revision": 6, "date": "2026-11-15", "change": "acceptance[0].verify names `--reporter=tree`, the reporter that prints the one line per pin file this is scored on: in a runner's non-TTY shell vitest's default reporter prints the run's totals only (RUNNER.md's environment facts; QA run #33784's note 10, comment 6893243542). No clause or threshold changed. Card #33969", "ref": "#34068" }
       ]
     },
     {
@@ -2655,7 +2724,7 @@
       "title": "Flow run semantics on v18: current_user is bound in CEL (null on a schedule run), `record` exists only when the run was handed one, a non-system caller starting a runAs:\"system\" self-triggered flow is refused 403 with nothing run, and a decision with overlapping true edges takes the FIRST",
       "since": "v18",
       "status": "active",
-      "revision": 3,
+      "revision": 5,
       "priority": "P1",
       "surface": "api",
       "personas": [
@@ -2667,19 +2736,19 @@
         "requires": [
           "a fresh boot of the showcase: `pnpm dev -- --fresh -p PORT --seed-admin` (ephemeral DB; the seeded admin is printed)",
           "a SCRATCH copy of examples/app-showcase (or a scaffolded blank app) for every planted-metadata step — never edit the shared fixtures; a file DB under /tmp/RUN/ for every boot",
-          "scratch flows: a record-triggered flow writing current_user.id, on an object the MEMBER may update — the stock member's own set (showcase_member_default) grants showcase_task read + create, NOT edit, so a member's PATCH of showcase_task answers 403 PERMISSION_DENIED: either bind the member to the showcase_contributor position (showcase_contributor edits the tasks assigned to them; the search:qa-contributor-bound-member recipe), or trigger the flow on the member's own showcase_private_note (QA run #24558); an autolaunched runAs:\"system\" flow; a decision node whose two edges are both true"
+          "scratch flows: a record-triggered flow writing current_user.id, on an object the MEMBER may update — the stock member's own set (showcase_member_default) grants showcase_task read + create, NOT edit, so a member's PATCH of showcase_task answers 403 PERMISSION_DENIED: either bind the member to the showcase_contributor position (showcase_contributor edits the tasks assigned to them; the search:qa-contributor-bound-member recipe), or trigger the flow on the member's own showcase_private_note (QA run #24558); an autolaunched runAs:\"system\" flow named qa_elevated (start → one create_record, e.g. a showcase_private_note → end), registered as the admin through POST /api/v1/automation; a decision node whose two edges are both true"
         ]
       },
       "steps": [
         "as the member (contributor-bound, or on its own showcase_private_note — fixtures.requires[2]) update a record that fires the record-triggered flow; read the stamped field",
-        "as the member POST /api/v1/automation/qa_elevated/trigger",
+        "as the member POST /api/v1/automation/qa_elevated/trigger (qa_elevated is the fixtures.requires[2] scratch flow)",
         "trigger the decision flow and read which branch ran (run log)"
       ],
       "acceptance": [
         {
           "clause": "current_user binding, record binding, elevated-start refusal and first-match decisions — the permanent pins pass at the run subject sha (RUNNER rule 6: cite their output, never re-derive by hand)",
           "oracle": "test",
-          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
+          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --reporter=tree --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
           "evidence": "the vitest summary line per pin file, with the package name and the subject sha"
         },
         {
@@ -2735,6 +2804,18 @@
           "date": "2026-10-26",
           "change": "automated.ref adds the trigger door's wire pins and says which door each pin drives. Checklist-accuracy findings of the 18.2.0 sweep (QA run #25815, release-18.2.0-tier1, at 6679644a: a2/n0, and a1; wave anchor #25807, card #25840): the ref's two runtime elevated-door pins (packages/runtime/src/action-flow-elevated-door.test.ts and endpoint-flow-elevated-door.test.ts) are unit door pins over a scripted automation service and never drive the trigger door the step names, while the wire pins that do — packages/verify/src/automation-trigger-elevated-door.test.ts and packages/qa/dogfood/test/flow-door-elevated-start.dogfood.test.ts — were not in the ref; and no pin reads back a field a record-triggered run stamped over HTTP. Re-read at base 9753d1637f (both added files exist; the verify file's header calls itself the wire half on the real kernel). No clause changed",
           "ref": "#25840"
+        },
+        {
+          "revision": 4,
+          "date": "2026-11-14",
+          "change": "fixtures.requires[2] gives the elevated scratch flow the name steps[1] triggers (qa_elevated) and a body (autolaunched, runAs system, one create_record), which no recipe carried. No clause changed. Read from source at base 87330e89. Source record: QA record #33092 (comment 6850793622) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
+        },
+        {
+          "revision": 5,
+          "date": "2026-11-15",
+          "change": "acceptance[0].verify names `--reporter=tree`, the reporter that prints the one line per pin file this is scored on: in a runner's non-TTY shell vitest's default reporter prints the run's totals only (RUNNER.md's environment facts; QA run #33784's note 10, comment 6893243542). No clause or threshold changed. Card #33969",
+          "ref": "#34068"
         }
       ]
     },
@@ -2743,7 +2824,7 @@
       "title": "Inbound flow hooks accept ONLY the timestamped signature (t=,v1=): a body-only sha256= HMAC, a stale timestamp, an unknown flow and a wrong hook id all answer the SAME 401, and nothing is enqueued",
       "since": "v18",
       "status": "active",
-      "revision": 2,
+      "revision": 3,
       "priority": "P1",
       "surface": "api",
       "personas": [
@@ -2766,7 +2847,7 @@
         {
           "clause": "the timestamped-signature-only hook door — the permanent pins pass at the run subject sha (RUNNER rule 6: cite their output, never re-derive by hand)",
           "oracle": "test",
-          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
+          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --reporter=tree --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
           "evidence": "the vitest summary line per pin file, with the package name and the subject sha"
         },
         {
@@ -2807,6 +2888,12 @@
           "date": "2026-10-26",
           "change": "acceptance[2].verify says the cross-arm byte comparison is a live measurement the pins do not make. Checklist-accuracy finding of the 18.2.0 sweep (QA run #25815, release-18.2.0-tier1, at 6679644a: a2; wave anchor #25807, card #25840): no pin byte-compares the refusal arms' bodies against each other; the rows assert code + typeof message only, and member-vs-mount parity is per row, not across arms. Re-read at base 9753d1637f (inbound-hook-member.test.ts: the per-arm loop matches error.code and checks typeof error.message; the parity case compares viaMember to viaMount per row). The clause is unchanged",
           "ref": "#25840"
+        },
+        {
+          "revision": 3,
+          "date": "2026-11-15",
+          "change": "acceptance[0].verify names `--reporter=tree`, the reporter that prints the one line per pin file this is scored on: in a runner's non-TTY shell vitest's default reporter prints the run's totals only (RUNNER.md's environment facts; QA run #33784's note 10, comment 6893243542). No clause or threshold changed. Card #33969",
+          "ref": "#34068"
         }
       ]
     },
@@ -2815,7 +2902,7 @@
       "title": "Scheduled work is OFF on a stock v18 boot unless OS_AUTOMATION_SCHEDULED_WORK_ENABLED=true: schedule triggers bind and fire only with the flag, and the boot says which (D3 schedule-flow-acting-organization-required)",
       "since": "v18",
       "status": "active",
-      "revision": 2,
+      "revision": 3,
       "priority": "P1",
       "surface": "api",
       "personas": [
@@ -2836,7 +2923,7 @@
         {
           "clause": "the per-kernel scheduled-work policy — the permanent pins pass at the run subject sha (RUNNER rule 6: cite their output, never re-derive by hand)",
           "oracle": "test",
-          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
+          "verify": "run each file named in automated.ref with its package's vitest (`pnpm --filter PKG exec vitest run --reporter=tree --maxWorkers=2 FILE`, never through a bare `--`); every named file reports ≥1 test and 0 failed. A file that reports 0 tests or is not found is NOT a pass — it is a stale ref, fix the item",
           "evidence": "the vitest summary line per pin file, with the package name and the subject sha"
         },
         {
@@ -2876,6 +2963,12 @@
           "date": "2026-10-26",
           "change": "acceptance[1].verify and acceptance[2].verify say they are scored on a served boot, not from the pins. Checklist-accuracy finding of the 18.2.0 sweep (QA run #25815, release-18.2.0-tier1, at 6679644a: a1/a2; wave anchor #25807, card #25840): both pins assert that flows are armed (or not) and the refusal sentence on a LiteKernel; neither observes a served boot log line or run rows after intervals. Re-read at base 9753d1637f (both per-kernel-scheduled-work-policy.test.ts files assert getTriggerBindingAudit and the triggers' refusal text). No clause changed",
           "ref": "#25840"
+        },
+        {
+          "revision": 3,
+          "date": "2026-11-15",
+          "change": "acceptance[0].verify names `--reporter=tree`, the reporter that prints the one line per pin file this is scored on: in a runner's non-TTY shell vitest's default reporter prints the run's totals only (RUNNER.md's environment facts; QA run #33784's note 10, comment 6893243542). No clause or threshold changed. Card #33969",
+          "ref": "#34068"
         }
       ]
     },
@@ -2884,7 +2977,7 @@
       "title": "Customize a read-only base's flow in Studio: the pair's item under the base's name, declaring the override, is armed in place of the base in one reload, keeps the base's ledger switch, lets a waiting run finish on the base, and Restore re-arms the base — New similar stays a separate copy under a new name",
       "since": "v18",
       "status": "active",
-      "revision": 4,
+      "revision": 6,
       "priority": "P1",
       "surface": "mixed",
       "personas": [
@@ -2911,8 +3004,8 @@
         "edit the flow (e.g. a node's label) and let the autosave run: capture POST /api/v1/packages/com.example.showcase/ensure-customization and PUT /api/v1/meta/flow/showcase_budget_approval?mode=draft&package=com.example.showcase.custom; confirm no POST /api/v1/automation/showcase_budget_approval/toggle and no sys_metadata_activation write",
         "publish the pair; then GET /api/v1/automation/_status (one row for the name) and GET /api/v1/meta/flow/showcase_budget_approval (no package); read the header: the override badge is folded into the item's More menu (open auto-item-more; studio-override-chip sits in studio-item-header-folded-chips) beside the ledger switch (auto-ledger-switch) — no definition switch",
         "as the approver, approve the step-1 run's pending request; GET /api/v1/automation/showcase_budget_approval/runs/RUN_ID",
-        "PATCH the project budget again (a new value above 100000): the new run's step log",
-        "ledger: switch the flow off with auto-ledger-switch, PATCH the budget again (no run starts), switch it back on",
+        "PATCH the project budget again (a new value above 100000): the new run's step log. Then decide that run's pending request as in step 5 before any later budget change on this project: while an approval request on the same project is still pending, the next run's request is refused DUPLICATE_REQUEST and that run reads failed, so the runs acceptance[3] and acceptance[4] read would fail for the fixture's sake (QA run #33853). A fresh showcase_project per budget change avoids it too",
+        "ledger: switch the flow off with auto-ledger-switch, PATCH the budget again (no run starts), switch it back on, and PATCH the budget once more: that change starts a run that follows the override's definition, which is the 'on re-arms it' half acceptance[3] reads (the engine's trigger dispatch skips a flow only while isFlowEnabled answers false, packages/services/service-automation/src/engine.ts, so the switch turned back on arms the next change, it does not replay the change made while off). Decide that run's pending request before step 8's budget change, as in step 6",
         "Restore package original from the override chip's popover (studio-override-restore, as in studio-authoring.package-customize-restore-display steps[6]), read the confirmation (studio-restore-original-dialog) and confirm (studio-restore-original-confirm): capture the two DELETEs at the pair; PATCH the budget once more and read the new run",
         "New similar on the same flow (auto-new-similar-*): give a new name and label; read where the copy opens and its status",
         "Customize and publish the flow again (as steps 2–4), and while that override is live press New similar on it with another new name and label; read the answer, the copy's draft in the pair, and GET /api/v1/meta/flow/showcase_budget_approval; then Restore package original as in step 8"
@@ -3008,6 +3101,18 @@
           "date": "2026-11-08",
           "change": "steps[0], steps[3] and steps[7] corrected: the runs list is at data.runs, the override chip is folded into auto-item-more as studio-item-header-folded-chips, and Restore is the chip popover's studio-override-restore. fixtures.knownGaps gains acceptance[2]'s discrimination gap. Checklist-accuracy finding and coverage gap of QA run #31486 (owed:weekly, at 0647dabb). Read at base 4894cfe1",
           "ref": "#31499"
+        },
+        {
+          "revision": 5,
+          "date": "2026-11-15",
+          "change": "step-text correction, no clause change. steps[5]: decide the override run's pending request before the next budget change on the same project, or the later runs read failed DUPLICATE_REQUEST (QA run #33853 saw it on the runs acceptance[3] and acceptance[4] read). Source records: QA record #33853 (comment 6894307378) on #33761. Batch D of the #33761 close-out, card #33966",
+          "ref": "#33984"
+        },
+        {
+          "revision": 6,
+          "date": "2026-11-15",
+          "change": "step-text correction, no clause change. steps[6] now makes the budget change after switching the ledger back on, the change acceptance[3].verify reads ('with it on the next change runs the override'); the step stopped at switching it on, so the re-arm half had no step. steps[5] cites step 5, the approval step, not step 4. Read from source at base 895783a1 (engine.ts, the trigger dispatch's isFlowEnabled guard). Found while doing #33966 (batch D of the #33761 close-out); QA record #33853 (comment 6894307378) made that change as its R4",
+          "ref": "#33984"
         }
       ]
     },
@@ -3016,14 +3121,14 @@
       "title": "A package flow's by-name references resolve from its package: a subflow held by the flow's own package or one holder in its declared dependencies runs, one held only by the environment or an unrelated package is refused naming the holder and nothing runs",
       "since": "v18.4",
       "status": "active",
-      "revision": 2,
+      "revision": 3,
       "priority": "P2",
       "surface": "mixed",
       "personas": ["admin (the seeded admin): the trigger calls and the run reads"],
       "fixtures": {
         "app": "showcase",
         "requires": [
-          "two scratch packages, each its own scratch app directory (never the shared examples): qa_a (manifest id com.qa.addr-a, namespace qa_a) and qa_b (manifest id com.qa.addr-b, namespace qa_b), each a defineStack({ manifest: { id, namespace, version, type: 'app' }, … }) project compiled with `objectstack build` and installed into the boot with `os package install DIR/dist/objectstack.json` (admin credentials), so the registry holds every item under its package. Neither declares a dependency on the other unless a step says so. qa_a holds an autolaunched flow qa_a_child; qa_b holds two autolaunched flows: qa_b_parent with a subflow node naming qa_a_child, and qa_b_env with a subflow node naming qa_env_child",
+          "two scratch packages, each its own scratch app directory (never the shared examples): qa_a (manifest id com.qa.addr-a, namespace qa_a) and qa_b (manifest id com.qa.addr-b, namespace qa_b), each a defineStack({ manifest: { id, namespace, version, type: 'app' }, … }) project compiled with `objectstack build` and installed into the boot with `os package install DIR/dist/objectstack.json` (admin credentials), so the registry holds every item under its package. Neither declares a dependency on the other unless a step says so. qa_a holds an autolaunched flow qa_a_child; qa_b holds two autolaunched flows: qa_b_parent with a subflow node naming qa_a_child, and qa_b_env with a subflow node naming qa_env_child. The flows declare no `status`, so they install as 'draft' (the flow schema's default, packages/spec/src/automation/flow.zod.ts) and stay enabled: a draft flow still fires, and the trigger door runs it (the automation plugin's boot line says 'draft flows still fire their triggers'), so no step needs them active",
           "an environment flow qa_env_child saved with PUT /api/v1/meta/flow/qa_env_child and no ?package="
         ]
       },
@@ -3071,7 +3176,7 @@
       ],
       "automated": {
         "kind": "unit",
-        "ref": "packages/services/service-automation/src/flow-package-scoped-resolution.test.ts (the subflow cases, red lines 1 and 2)"
+        "ref": "packages/services/service-automation/src/flow-package-scoped-resolution.test.ts (the subflow cases, red lines 1 and 2) + packages/plugins/plugin-email/src/template-loader.test.ts and packages/plugins/plugin-webhooks/src/declared-webhooks.test.ts (acceptance[4]'s template and webhook halves, the two its verify runs)"
       },
       "source": [
         "packages/services/service-automation/src/engine.ts (execute refuses a name the resolver refuses for the caller's package, before dispatch)",
@@ -3090,6 +3195,12 @@
           "date": "2026-11-10",
           "change": "fixture-text correction, no clause change: the scratch package ids are re-spelled with a hyphen (com.qa.addr-a, com.qa.addr-b) everywhere this item names them (fixtures and acceptance), because `objectstack build` refuses an underscore in a package id (packages/spec/src/kernel/manifest.zod.ts#MANIFEST_ID_PATTERN, refused with manifestIdRefusal). The namespaces qa_a and qa_b and every namespace-qualified address are unchanged. No step, clause or variant changes meaning. Found by the M4 verification run (#32316, FOLLOW-UPS §19b); card #32330",
           "ref": "#32330"
+        },
+        {
+          "revision": 3,
+          "date": "2026-11-14",
+          "change": "fixtures.requires[0] says what status the scratch flows carry (none declared, so 'draft' by the flow schema's default, which still fires: packages/services/service-automation/src/plugin.ts boot line); automated.ref adds the two tests acceptance[4].verify already runs (template-loader.test.ts, declared-webhooks.test.ts). No clause changed. Read from source at base 87330e89. Source records: QA records #33048 (comment 6846028996) and #33096 (comment 6851700388) on #32908. Batch E of the #32908 close-out, card #33331",
+          "ref": "#33331"
         }
       ]
     }

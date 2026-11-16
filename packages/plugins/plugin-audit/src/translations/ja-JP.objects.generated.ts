@@ -41,10 +41,11 @@ export const jaJPObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "プラットフォーム管理者権限の変更",
           action_invocation: "アクション実行",
           package_uninstall: "パッケージのアンインストール",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "非管理パッケージのインポート",
+          credential_use: "資格情報の使用",
+          scim_refused: "SCIM 要求の拒否",
+          audit_signing_key_change: "監査署名キーの変更",
+          dataset_query: "データセットクエリ"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const jaJPObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

@@ -24,10 +24,11 @@ import { summarizeRun } from './run-summary.js';
 import { withDroppedFields } from './run-dropped-fields.js';
 import { describeThrownForLog } from './thrown-cause-diagnostics.js';
 // The values below (`AutomationEngine` for its public static
-// `MAX_NODE_REENTRIES`) are read only inside the function bodies, at call time,
+// `MAX_NODE_REENTRIES`, and `activeMsAtPause`) are read only inside the function bodies, at call time,
 // never while a module is evaluating, so the import cycle with ./engine.js is
 // safe under ESM live bindings; the tsup bundle is one file and has no cycle.
 import {
+    activeMsAtPause,
     AutomationEngine,
     buildRunTrigger,
     DEFAULT_BRANCH_LABEL,
@@ -41,6 +42,7 @@ import {
     type StepLogEntry,
 } from './engine.js';
 import { createEvalUser, type EvalUserParsed } from '@objectstack/spec/identity';
+import { DroppedFieldsEventSchema, type DroppedFieldsEvent } from '@objectstack/spec/data';
 import { structuralConditionRefusal } from '@objectstack/spec/automation';
 // [#15137] The `value`-role half of the ledger. Both halves of "is this envelope
 // well-formed?" are IMPORTED, never re-spelled here: the shape rule is
@@ -96,6 +98,43 @@ export function runUserOf(context: AutomationContext | undefined): EvalUserParse
         positions: Array.isArray(context?.positions) ? context.positions : [],
         ...(typeof context?.tenantId === 'string' ? { organizationId: context.tenantId } : {}),
     });
+}
+
+/**
+ * The step-log copy of an executor's advisory members, in exactly the shape
+ * `ExecutionStepLogSchema` declares for them. The step is persisted with the
+ * run and served verbatim by the run-history routes, so what reaches it is
+ * what a reader of the run is handed: a host-registered executor's malformed
+ * value must not be copied onto it as-is (a truthy `length` is not a list of
+ * drop events).
+ *
+ * `droppedFields` keeps each element that is a well-typed
+ * `DroppedFieldsEventSchema` event and skips the rest: the same per-element
+ * filter the run's terminal answer applies when it folds the step log
+ * (`foldDropEvents`), so the step and the answer agree on which events were
+ * well-typed. They part on one shape only: a well-typed event with
+ * `fields: []` stays on the step, while the fold drops it from the answer
+ * (no in-tree producer emits one). `warnings` keeps its string entries. A member with
+ * nothing well-typed left is omitted, never `[]`. Total, never throwing: it
+ * runs inside the step's `try`, where a throw would read as a node failure.
+ */
+function stepAdvisoriesOf(result: NodeExecutionResult): { warnings?: string[]; droppedFields?: DroppedFieldsEvent[] } {
+    const out: { warnings?: string[]; droppedFields?: DroppedFieldsEvent[] } = {};
+    const rawWarnings: unknown = result.warnings;
+    if (Array.isArray(rawWarnings)) {
+        const warnings = rawWarnings.filter((w): w is string => typeof w === 'string');
+        if (warnings.length > 0) out.warnings = warnings;
+    }
+    const rawDrops: unknown = result.droppedFields;
+    if (Array.isArray(rawDrops)) {
+        const droppedFields: DroppedFieldsEvent[] = [];
+        for (const raw of rawDrops) {
+            const parsed = DroppedFieldsEventSchema.safeParse(raw);
+            if (parsed.success) droppedFields.push(parsed.data);
+        }
+        if (droppedFields.length > 0) out.droppedFields = droppedFields;
+    }
+    return out;
 }
 
 /**
@@ -414,8 +453,8 @@ export async function executeNode(
                 completedAt: new Date().toISOString(),
                 durationMs: Date.now() - stepStart,
                 error: { code: 'NODE_FAILURE', message: errMsg },
-                ...(result.warnings?.length ? { warnings: result.warnings } : {}),
-                ...(result.droppedFields?.length ? { droppedFields: result.droppedFields } : {}),
+                // In the declared step-log shape only (`stepAdvisoriesOf`).
+                ...stepAdvisoriesOf(result),
                 // #4354 — a node that failed PART WAY may still have written
                 // rows; dropping its counts would understate what the run did.
                 ...(result.metrics ? { metrics: result.metrics } : {}),
@@ -495,10 +534,11 @@ export async function executeNode(
             startedAt: stepStartedAt,
             completedAt: new Date().toISOString(),
             durationMs: Date.now() - stepStart,
-            ...(result.warnings?.length ? { warnings: result.warnings } : {}),
-            // #32861 — the structured events behind those warnings, folded
-            // onto the run's terminal answer (`dropEventsOf`).
-            ...(result.droppedFields?.length ? { droppedFields: result.droppedFields } : {}),
+            // #32861 — `droppedFields`, the structured events behind those
+            // warnings, is folded onto the run's terminal answer
+            // (`dropEventsOf`). Both members are copied in the declared
+            // step-log shape only (`stepAdvisoriesOf`).
+            ...stepAdvisoriesOf(result),
             ...(result.metrics ? { metrics: result.metrics } : {}),
         });
 
@@ -1190,9 +1230,49 @@ export function seedRunVariables(
     return variables;
 }
 
+/**
+ * The start node's trigger-condition gate — the ONE evaluator both attempt
+ * paths call: `execute()` (attempt 1) and {@link executeWithoutRetry} (every
+ * retry attempt).
+ *
+ * The start node's `condition` is the predicate that decides whether the
+ * trigger event should launch the flow at all (e.g.
+ * `status == "done" && previous.status != "done"`). The engine, not the
+ * trigger, owns evaluating it, so every trigger type and a manual `execute()`
+ * share one gate. Plain-string conditions are routed through CEL so bare field
+ * references resolve.
+ *
+ * Three answers, the same on every attempt:
+ * - no condition authored (absent, `null` or `''`) → `true`, the run proceeds;
+ * - the condition does not hold → `false`, the caller answers the
+ *   `condition_not_met` skip and runs no node;
+ * - the condition cannot be evaluated → it THROWS (ADR-0032 §1c, via
+ *   `evaluateCondition`): a fault, which `execute()`'s catch hands to the
+ *   flow's error strategy. Under `strategy: 'retry'` the fault is retried,
+ *   and each retry attempt re-runs this gate — a fault stays a fault and
+ *   never becomes a pass. Before this was shared, the retry path never
+ *   evaluated the condition, so a condition that faulted on attempt 1 let
+ *   attempts 2..N run the nodes ungated.
+ */
+export function startConditionHolds(
+    this: Pick<DagTraversalHost, 'evaluateCondition'>,
+    startNode: FlowNodeParsed,
+    variables: Map<string, unknown>,
+    context: AutomationContext,
+): boolean {
+    const startCondition = (startNode.config as Record<string, unknown> | undefined)?.condition as
+        | string
+        | { dialect?: string; source?: string; ast?: unknown }
+        | undefined;
+    if (startCondition === undefined || startCondition === null || startCondition === '') return true;
+    const condExpr =
+        typeof startCondition === 'string' ? { dialect: 'cel', source: startCondition } : startCondition;
+    return this.evaluateCondition(condExpr, variables, context);
+}
+
 /** The body of {@link AutomationEngine.executeWithoutRetry}, moved unedited; that method's docblock is its contract. */
 export async function executeWithoutRetry(
-    this: Pick<DagTraversalHost, 'flows' | 'isFlowEnabled' | 'describeDisabledFlow' | 'nextRunId' | 'seedRunVariables' | 'resolveRunContext' | 'validateNodeInputSchemas' | 'executeNode' | 'recordLog' | 'logger' | 'finishRefusedRun' | 'persistSuspendedRun' | 'flowChecksumOf' | 'renderFlowTerminalMessage' | 'flowSlotPackage'>,
+    this: Pick<DagTraversalHost, 'flows' | 'isFlowEnabled' | 'describeDisabledFlow' | 'nextRunId' | 'seedRunVariables' | 'resolveRunContext' | 'evaluateCondition' | 'validateNodeInputSchemas' | 'executeNode' | 'recordLog' | 'logger' | 'finishRefusedRun' | 'persistSuspendedRun' | 'flowChecksumOf' | 'renderFlowTerminalMessage' | 'flowSlotPackage'>,
     flowName: string,
     context?: AutomationContext,
     dispatched?: { errorMessage: string | undefined },
@@ -1254,6 +1334,19 @@ export async function executeWithoutRetry(
             // [#9415] Same classification as `execute()`'s start-node exit,
             // for the reason the disabled exit above states.
             return { success: false, code: 'FLOW_NO_START_NODE', error: 'Flow has no start node' };
+        }
+
+        // The SAME trigger-condition gate attempt 1 runs under, through the
+        // same evaluator (`startConditionHolds`), and in the same place: after
+        // the start-node lookup, before the input-schema guard and any node.
+        // A condition that does not hold on this attempt skips the run with
+        // the envelope `execute()` answers; one that throws lands in this
+        // method's failure arm below and consumes one retry attempt, so a
+        // condition that faults on every attempt ends the run `failed` with no
+        // node executed. `start-condition-retry-33935.test.ts` pins all three.
+        if (!startConditionHolds.call(this, startNode, variables, runContext)) {
+            this.logger.debug(`Flow '${flowName}' skipped: start condition not met`);
+            return { success: true, output: { skipped: true, reason: 'condition_not_met' }, flowLabel: flow.label };
         }
 
         // [#9889] The SAME definition-level guard attempt 1 runs under —
@@ -1324,6 +1417,8 @@ export async function executeWithoutRetry(
                 startedAt,
                 completedAt: new Date().toISOString(),
                 durationMs,
+                // [#32284] A retry attempt is an initial execution: it never paused.
+                waitMs: 0,
                 trigger: buildRunTrigger(context),
                 steps,
                 output,
@@ -1384,7 +1479,7 @@ export async function executeWithoutRetry(
         if (isRefusalSignal(err)) {
             return this.finishRefusedRun({
                 runId, flowName, flowVersion: flow.version,
-                startedAt, durationMs: Date.now() - startTime,
+                startedAt, durationMs: Date.now() - startTime, waitMs: 0,
                 steps, flow, variables,
                 refusalMessage: err.message, context,
             });
@@ -1431,6 +1526,8 @@ export async function executeWithoutRetry(
         // method returns — the only id `resume()` can be called with.
         if (isSuspendSignal(err)) {
             const durationMs = Date.now() - startTime;
+            // [#32284] This attempt's first pause — see `execute()`'s.
+            const waitMs = 0;
             // #7639 — ONE snapshot expression feeding BOTH consumers: the
             // continuation the run will resume from, and the `paused` log
             // entry run-detail serves. Same object, so what an operator
@@ -1448,6 +1545,7 @@ export async function executeWithoutRetry(
                 context: runContext,
                 startedAt,
                 startTime,
+                activeMs: activeMsAtPause(durationMs, waitMs),
                 correlation: err.correlation,
                 screen: err.screen,
             });
@@ -1458,6 +1556,7 @@ export async function executeWithoutRetry(
                 status: 'paused',
                 startedAt,
                 durationMs,
+                waitMs,
                 trigger: buildRunTrigger(context),
                 steps,
                 variables: variablesSnapshot,
@@ -1502,6 +1601,7 @@ export async function executeWithoutRetry(
             startedAt,
             completedAt: new Date().toISOString(),
             durationMs,
+            waitMs: 0,
             trigger: buildRunTrigger(context),
             steps,
             error: errorMessage,

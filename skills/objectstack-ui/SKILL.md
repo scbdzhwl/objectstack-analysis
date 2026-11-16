@@ -18,7 +18,7 @@ license: Apache-2.0
 compatibility: Requires @objectstack/spec 18.x (Zod v4 schemas)
 metadata:
   author: objectstack-ai
-  version: "18.4.0"
+  version: "18.5.0"
   domain: ui
   tags: view, app, page, dashboard, report, chart, action, widget, doc
 ---
@@ -82,9 +82,8 @@ custom page or form config. Prefer, in order:
      type: 'simple',
      sections: [{ group: 'invoice_header' }],  // a declared fieldGroup
      subforms: [
-       { childObject: 'invoice_line', // relationshipField + columns are
-         title: 'Line Items',         // derived from the child object;
-         addLabel: 'Add line' },      // set `columns` here only to override.
+       { childObject: 'invoice_line', // set `columns` only to override
+         title: 'Line Items', addLabel: 'Add line' },
      ],
    },
    ```
@@ -102,8 +101,9 @@ every behaviour is derived from the DATA MODEL — computed columns, catalog
 typeahead auto-fill, persisted drag-reorder, and the live Subtotal → Tax → Total
 stack: **objectstack-data → Relationships → Inline Editing**. Three things are
 authored on this side: a trailing **ghost** row always exists, so never add an
-"Add line" button (typing in the ghost materialises a row; an untouched one is
-never persisted); `autofill: false` opts one column out of the typeahead copy;
+"Add line" button to the grid (typing in the ghost materialises a row; an
+untouched one is never persisted; a record-header action that inserts a priced
+line is [Actions](./rules/actions.md)); `autofill: false` opts one column out of the typeahead copy;
 and the form's `taxRateField` overrides which parent field drives the totals.
 
 **Read side — the record page.** Child relationships are related lists on the
@@ -141,8 +141,10 @@ Build an App with `App.create({...})` from
 amended): `defineStack` refuses a second app in a `type: 'app'` and a
 `type: 'module'` package alike. A suite (an app package plus its modules) may
 surface more apps: each further app goes in a module of its own with the
-objects it shows, served under that module's package id and gone when it is
-disabled. Audiences sharing one product and its objects stay
+objects it shows (gone when it is disabled), and the suite composes with
+`composeStacks(stacks, { manifest: 'preserve' })`, which serves each app under
+its own package id; a flat composition puts them under one and is refused.
+Audiences sharing one product and its objects stay
 `requiredPermissions`-gated groups **inside** one app.
 
 Who sees an app (`tabPermissions`) and who may open it (app
@@ -163,9 +165,8 @@ Who sees an app (`tabPermissions`) and who may open it (app
 | `doc`       | `book?` / `doc?` (one required), `label`, `icon` | Package docs; inherits docs audience |
 | `separator` | —                                             | Visual separator |
 
-> **`requiresObject` / `requiresService`:** Use these on any item that
-> depends on an optional system object or kernel service so the nav item is
-> automatically hidden when missing — never hard-code conditional UI.
+> **`requiresObject` / `requiresService`** hide an item whose optional
+> system object or kernel service is missing — never hard-code conditional UI.
 
 ---
 

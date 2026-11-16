@@ -377,6 +377,10 @@ export const jaJPMetadataForms: NonNullable<TranslationData['metadataForms']> = 
         label: "所有者は編集可",
         helpText: "オン: 子レコードの所有者（その owner_id）は、親レコードの読み取り権限があればその行を id 指定で更新できます。それ以外の人、およびすべての挿入・削除・複数行更新・代理書き込みには、引き続き親レコードの編集権限が必要です。オフ（デフォルト）: 子レコードのすべての書き込みに親レコードの編集権限が必要です。"
       },
+      "sharing.controlledByParent.writeRequiresMasterRead": {
+        label: "親レコードの読み取りで書き込み可",
+        helpText: "オン: 親レコードを読み取れる人は、子オブジェクト自身の権限、行レベルセキュリティ、項目レベルセキュリティが許す範囲で、子レコードを挿入・更新・削除できます。オフ（デフォルト）: 子レコードのすべての書き込みに親レコードの編集権限が必要です。「所有者は編集可」と同時にオンにしないでください。この設定がそれを含みます。"
+      },
       access: {
         label: "アクセス設定",
         helpText: "ワイルドカード付与の方針（ADR-0066 D2）。省略時は public として解決されます。権限セットの '*' オブジェクト付与がこのオブジェクトに及ぶかどうかを決めます。ユーザー間のレコード可視性は sharingModel が決めます。"
@@ -963,15 +967,27 @@ export const jaJPMetadataForms: NonNullable<TranslationData['metadataForms']> = 
       },
       refusals: {
         label: "拒否カタログ",
-        helpText: "本体がスローする SCREAMING_SNAKE のコード（例: CLEAN_VERSION_REQUIRED）をキーとする拒否カタログ。呼び出し元には宣言したメッセージ（その言語に翻訳）と宣言したステータスが返ります。JavaScript（L2）本体のみ"
+        helpText: "フックがスローする SCREAMING_SNAKE のコード（例: CLEAN_VERSION_REQUIRED）をキーとする拒否カタログ。呼び出し元には宣言したメッセージ（その言語に翻訳）と宣言したステータスが返ります。JavaScript（L2）本体またはハンドラーで使用可能。expression 本体では拒否されます"
       },
       "refusals.message": {
         label: "メッセージ",
-        helpText: "本体がこのコードをスローしたときにユーザーが読む文 — プレーンテキスト、プレースホルダーなし"
+        helpText: "本体がこのコードをスローしたときにユーザーが読む文。プレーンテキスト。ただしエントリが params を宣言している場合、{{ name }} プレースホルダーに宣言済みのパラメーターが入ります"
       },
       "refusals.status": {
         label: "ステータス",
         helpText: "拒否の HTTP ステータス（400–499）。未指定: 400"
+      },
+      "refusals.reasons": {
+        label: "理由",
+        helpText: "同じコードの下に置く追加の文。本体がコードと一緒にスローする snake_case の理由（{ code, reason }）をキーとします。送信されるコードとステータスはこのエントリのものです。ここで宣言されていない理由は拒否されます。未指定: スローされた理由は読まれません"
+      },
+      "refusals.reasons.message": {
+        label: "メッセージ",
+        helpText: "本体がこのコードの下でこの理由をスローしたときにユーザーが読む文。{{ }} プレースホルダーはエントリの params に従います"
+      },
+      "refusals.params": {
+        label: "パラメーター",
+        helpText: "文に埋め込める名前（例: state）。本体が { code, params: { state } } をスローすると、{{ state }} プレースホルダーにその値が表示されます。未指定: 文はプレーンテキストです"
       },
       handler: {
         label: "ハンドラー",

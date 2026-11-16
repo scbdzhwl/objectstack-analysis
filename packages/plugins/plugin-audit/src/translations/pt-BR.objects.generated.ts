@@ -41,10 +41,11 @@ export const ptBRObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "Alteração do status de administrador da plataforma",
           action_invocation: "Invocação de ação",
           package_uninstall: "Desinstalação de pacote",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "Importação de pacote não gerenciado",
+          credential_use: "Uso de credencial",
+          scim_refused: "Solicitação SCIM recusada",
+          audit_signing_key_change: "Alteração da chave de assinatura de auditoria",
+          dataset_query: "Consulta de conjunto de dados"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const ptBRObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

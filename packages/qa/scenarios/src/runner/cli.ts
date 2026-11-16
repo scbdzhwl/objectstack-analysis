@@ -9,11 +9,17 @@
  *                        any other directory is loaded as the private overlay,
  *                        where a `generic` card is refused (`libraryOf`)
  *   --only ID[,ID]       run only these cards
- *   --modes M[,M]        scratch, template (default: both)
+ *   --modes M[,M]        scratch, template, ask (default: scratch,template);
+ *                        ask runs only the questions and operations on a
+ *                        verified build — --template F, else this run's
+ *                        scratch build when it passed — and authors nothing,
+ *                        so ask without --template and without scratch is
+ *                        refused before any card runs
  *   --driver claude      the local Claude Code CLI on your own login (default)
  *   --driver codex       the local OpenAI Codex CLI on your own ChatGPT plan
- *                        login (`drivers/codex.ts`); it has no turn cap, so the
- *                        two --*-max-turns flags are refused with it
+ *                        login (`drivers/codex.ts`); it has no turn cap and no
+ *                        effort flag, so the two --*-max-turns flags and the
+ *                        three effort flags are refused with it
  *   --driver external:C  any command C that speaks the driver contract (one
  *                        process per call, JSON in on stdin, JSON out on stdout;
  *                        `drivers/external.ts` and the package README); every
@@ -30,6 +36,12 @@
  *                        half not measured
  *   --ask-max-turns N    the live driver's turn cap per question or operation
  *                        turn (default 12)
+ *   --ask-repeats N      ask each (question, persona) turn N times on the same
+ *                        booted app, each ask a fresh agent session, and score
+ *                        k/N per turn (default 1); operations run once. Any
+ *                        driver: a replay (`recorded:`) reads the first N asks
+ *                        the recording holds of each question turn, and an N
+ *                        it holds fewer of is refused before any card runs
  *   --model M            the model every live turn asks for, an alias (`sonnet`)
  *                        or a name (`claude-sonnet-4-5`), as `claude --model`
  *                        takes it (default: the login's own)
@@ -38,7 +50,33 @@
  *   --ask-model M        the model for question and operation turns, in place
  *                        of --model; the record and the scorecard state the
  *                        model each turn was served, and mark a mismatch
- *   --template F         a verified build (dist/objectstack.json) for template mode
+ *   --effort LEVEL       the effort level every live turn asks for, as
+ *                        `claude --effort` takes it (Claude Code 2.1.325: low,
+ *                        medium, high, xhigh, max); a level the CLI's own
+ *                        `--help` does not list is refused before any card
+ *                        runs (default: CLAUDE_CODE_EFFORT_LEVEL when set, else
+ *                        the CLI's default effort)
+ *   --author-effort L    the effort for authoring turns, in place of --effort
+ *   --ask-effort L       the effort for question and operation turns, in place
+ *                        of --effort; the record and the scorecard state the
+ *                        effort each turn asked for beside its served model
+ *   --lang zh|en         render every card text a prompt carries (the build
+ *                        prompt, the iterate change, each question's and each
+ *                        operation's ask) in this language and no other; a
+ *                        card missing one that the run's modes render is
+ *                        skipped before the first card runs, naming each
+ *                        missing text, and the other cards run. The runner's
+ *                        own wrapper text stays in English (default: each
+ *                        text in English when the card has it, else Chinese)
+ *   --prompt short|detailed
+ *                        the card prompt the build turn is given (default
+ *                        detailed); the iterate turn is unchanged. The record
+ *                        and the scorecard state both choices when either
+ *                        flag is given, a recording carries them, and a
+ *                        replay (`recorded:`) under other choices than its
+ *                        recording's is refused before any card runs
+ *   --template F         a verified build (dist/objectstack.json) for template
+ *                        and ask modes
  *   --no-iterate-run     skip the Run half after the iterate (scratch mode)
  *   --out DIR            where records go (default docs/qa/platform-checklist/runs, git-ignored;
  *                        ./scenario-runs when run from the published package)
@@ -66,9 +104,11 @@ import { ClaudeCodeDriver, RecordedDriver, RecordingDriver, type AgentDriver } f
 import { CodexDriver } from './drivers/codex.js';
 import { ExternalDriver } from './drivers/external.js';
 import { CAPABILITY_AREAS_DIR, locateLibraryRoot } from './library.js';
-import { minutesText, runCard, type ProjectOps } from './orchestrate.js';
+import { askModeRefusal, minutesText, runCard, type ProjectOps } from './orchestrate.js';
 import { installedSpecVersion, PACKAGES_MODES, prepareWorkspacePackages, settleWorkspaceProject, workspaceScaffolder, type PackageSource, type PackagesMode } from './packages.js';
 import { bootDev, os, readArtifact, readNamespace, scaffold } from './project.js';
+import { PROMPT_LANGS, PROMPT_LENGTHS, promptChoiceText, promptLanguageRefusal, statedPromptChoice, type PromptChoice, type PromptLang, type PromptLength } from './prompts.js';
+import { rebaseScenario } from './run-date.js';
 import { cardScorecard, renderScorecard, runRecord } from './scorecard.js';
 
 /** The dev admin `objectstack dev --fresh` seeds; the runner and the gallery exporter sign in as it. */
@@ -87,7 +127,7 @@ export function findUp(start: string, test: (dir: string) => boolean): string {
 export interface CliArgs {
   cards?: string;
   only?: string[];
-  modes: Array<'scratch' | 'template'>;
+  modes: Array<'scratch' | 'template' | 'ask'>;
   driver: string;
   record?: string;
   template?: string;
@@ -98,17 +138,29 @@ export interface CliArgs {
   authorMaxTurns?: number;
   /** Turns per question or operation turn (`--ask-max-turns`); the driver's default when absent. */
   askMaxTurns?: number;
+  /** How many times each (question, persona) turn is asked (`--ask-repeats`); once when absent. Not a live-only flag: a replay reads that many recorded asks. */
+  askRepeats?: number;
   /** The model every live turn asks for (`--model`); the login's default when absent. */
   model?: string;
   /** The model an authoring turn asks for (`--author-model`), in place of `model`. */
   authorModel?: string;
   /** The model a question or operation turn asks for (`--ask-model`), in place of `model`. */
   askModel?: string;
+  /** The effort level every live turn asks for (`--effort`); the CLI's default when absent. */
+  effort?: string;
+  /** The effort level an authoring turn asks for (`--author-effort`), in place of `effort`. */
+  authorEffort?: string;
+  /** The effort level a question or operation turn asks for (`--ask-effort`), in place of `effort`. */
+  askEffort?: string;
   out?: string;
   work?: string;
   createVersion?: string;
   /** `--packages`: where the `@objectstack/*` packages come from. */
   packages: PackagesMode;
+  /** `--lang`: the language every card text a prompt renders is sent in ({@link PromptChoice.lang}); absent ⇒ English, else Chinese, per text. */
+  lang?: PromptLang;
+  /** `--prompt`: the card prompt the build turn is given ({@link PromptChoice.prompt}); absent ⇒ `detailed`. */
+  prompt?: PromptLength;
 }
 
 export function parseArgs(argv: readonly string[]): CliArgs {
@@ -131,11 +183,16 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       if (raw.trim() === '' || raw.startsWith('-')) throw new Error(`${flag} takes a model alias or name (sonnet, opus, claude-sonnet-4-5), not \`${raw}\``);
       return raw;
     };
+    const effort = () => {
+      const raw = val();
+      if (raw.trim() === '' || raw.startsWith('-')) throw new Error(`${flag} takes an effort level as \`claude --effort\` takes it (low, medium, high, xhigh, max), not \`${raw}\``);
+      return raw.trim();
+    };
     if (flag === '--cards') a.cards = val();
     else if (flag === '--only') a.only = val().split(',');
     else if (flag === '--modes') {
       const modes = val().split(',');
-      for (const m of modes) if (m !== 'scratch' && m !== 'template') throw new Error(`unknown mode \`${m}\` (scratch, template)`);
+      for (const m of modes) if (m !== 'scratch' && m !== 'template' && m !== 'ask') throw new Error(`unknown mode \`${m}\` (scratch, template, ask)`);
       a.modes = modes as CliArgs['modes'];
     } else if (flag === '--driver') a.driver = val();
     else if (flag === '--record') a.record = val();
@@ -149,9 +206,27 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     }
     else if (flag === '--author-max-turns') a.authorMaxTurns = turns();
     else if (flag === '--ask-max-turns') a.askMaxTurns = turns();
+    else if (flag === '--ask-repeats') {
+      const raw = val();
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n <= 0) throw new Error(`--ask-repeats takes a whole number of asks above 0, not \`${raw}\``);
+      a.askRepeats = n;
+    }
     else if (flag === '--model') a.model = model();
     else if (flag === '--author-model') a.authorModel = model();
     else if (flag === '--ask-model') a.askModel = model();
+    else if (flag === '--effort') a.effort = effort();
+    else if (flag === '--author-effort') a.authorEffort = effort();
+    else if (flag === '--ask-effort') a.askEffort = effort();
+    else if (flag === '--lang') {
+      const l = val();
+      if (!(PROMPT_LANGS as readonly string[]).includes(l)) throw new Error(`unknown --lang \`${l}\` (${PROMPT_LANGS.join(', ')})`);
+      a.lang = l as PromptLang;
+    } else if (flag === '--prompt') {
+      const p = val();
+      if (!(PROMPT_LENGTHS as readonly string[]).includes(p)) throw new Error(`unknown --prompt \`${p}\` (${PROMPT_LENGTHS.join(', ')})`);
+      a.prompt = p as PromptLength;
+    }
     else if (flag === '--out') a.out = val();
     else if (flag === '--work') a.work = val();
     else if (flag === '--create-version') a.createVersion = val();
@@ -161,10 +236,17 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       a.packages = p as PackagesMode;
     } else throw new Error(`unknown flag \`${flag}\``);
   }
+  const askRefusal = askModeRefusal(a.modes, a.template !== undefined);
+  if (askRefusal) throw new Error(askRefusal);
   if (a.packages === 'workspace' && a.createVersion !== undefined) {
     throw new Error('--create-version names a published create-objectstack; --packages workspace scaffolds with the one this checkout builds');
   }
   return a;
+}
+
+/** The prompt choice `--lang` and `--prompt` set ({@link PromptChoice}), or `undefined` when neither is given: the default prompts. */
+export function promptChoiceOf(args: Pick<CliArgs, 'lang' | 'prompt'>): PromptChoice | undefined {
+  return statedPromptChoice({ ...(args.lang !== undefined ? { lang: args.lang } : {}), ...(args.prompt !== undefined ? { prompt: args.prompt } : {}) });
 }
 
 /** The live driver's limits a run may set: `--author-timeout`, `--author-max-turns`, `--ask-max-turns`. */
@@ -173,16 +255,26 @@ export type DriverLimits = Pick<CliArgs, 'authorTimeoutMin' | 'authorMaxTurns' |
 /** The models a run may ask the live driver for: `--model`, `--author-model`, `--ask-model`. */
 export type DriverModels = Pick<CliArgs, 'model' | 'authorModel' | 'askModel'>;
 
-const LIVE_FLAGS: ReadonlyArray<readonly [keyof (DriverLimits & DriverModels), string]> = [
+/** The effort levels a run may ask the live driver for: `--effort`, `--author-effort`, `--ask-effort`. */
+export type DriverEfforts = Pick<CliArgs, 'effort' | 'authorEffort' | 'askEffort'>;
+
+const LIVE_FLAGS: ReadonlyArray<readonly [keyof (DriverLimits & DriverModels & DriverEfforts), string]> = [
   ['authorTimeoutMin', '--author-timeout'],
   ['authorMaxTurns', '--author-max-turns'],
   ['askMaxTurns', '--ask-max-turns'],
   ['model', '--model'],
   ['authorModel', '--author-model'],
   ['askModel', '--ask-model'],
+  ['effort', '--effort'],
+  ['authorEffort', '--author-effort'],
+  ['askEffort', '--ask-effort'],
 ];
 
-export function makeDriver(spec: string, opts: DriverLimits & DriverModels = {}): AgentDriver {
+/** The live flags of `keys` that `opts` sets, as typed (`--effort`), in {@link LIVE_FLAGS} order. */
+const givenFlags = (opts: DriverLimits & DriverModels & DriverEfforts, keys?: ReadonlyArray<keyof (DriverLimits & DriverModels & DriverEfforts)>): string[] =>
+  LIVE_FLAGS.filter(([key]) => (keys === undefined || keys.includes(key)) && opts[key] !== undefined).map(([, flag]) => flag);
+
+export function makeDriver(spec: string, opts: DriverLimits & DriverModels & DriverEfforts = {}): AgentDriver {
   if (spec === 'claude') {
     return new ClaudeCodeDriver({
       ...(opts.authorTimeoutMin !== undefined ? { authorTimeoutMs: opts.authorTimeoutMin * 60_000 } : {}),
@@ -191,17 +283,25 @@ export function makeDriver(spec: string, opts: DriverLimits & DriverModels = {})
       ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(opts.authorModel !== undefined ? { authorModel: opts.authorModel } : {}),
       ...(opts.askModel !== undefined ? { askModel: opts.askModel } : {}),
+      ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+      ...(opts.authorEffort !== undefined ? { authorEffort: opts.authorEffort } : {}),
+      ...(opts.askEffort !== undefined ? { askEffort: opts.askEffort } : {}),
     });
   }
   if (spec.startsWith('recorded:')) {
-    const given = LIVE_FLAGS.filter(([key]) => opts[key] !== undefined).map(([, flag]) => flag);
+    const given = givenFlags(opts);
     if (given.length) throw new Error(`${given.join(', ')} ${given.length === 1 ? 'applies' : 'apply'} to the live driver only: a replay re-reads each turn as it was recorded`);
     return RecordedDriver.fromFile(spec.slice('recorded:'.length));
   }
   if (spec === 'codex') {
     // Measured on codex-cli 0.167.0: `codex exec` takes no cap on its agentic turns (`drivers/codex.ts`).
-    const capped = (['authorMaxTurns', 'askMaxTurns'] as const).filter((k) => opts[k] !== undefined).map((k) => LIVE_FLAGS.find(([key]) => key === k)![1]);
+    const capped = givenFlags(opts, ['authorMaxTurns', 'askMaxTurns']);
     if (capped.length) throw new Error(`${capped.join(', ')} ${capped.length === 1 ? 'has' : 'have'} no equivalent in the Codex CLI: \`codex exec\` takes no turn cap`);
+    // Measured on codex-cli 0.167.0: `codex exec --help` has no effort flag, and the config key
+    // `model_reasoning_effort` starts a turn with any value (`bogus` included), so no level
+    // name could be checked against what the model was served; refused, never guessed.
+    const effort = givenFlags(opts, ['effort', 'authorEffort', 'askEffort']);
+    if (effort.length) throw new Error(`${effort.join(', ')} ${effort.length === 1 ? 'has' : 'have'} no equivalent in the Codex CLI: \`codex exec\` takes no effort flag`);
     return new CodexDriver({
       ...(opts.authorTimeoutMin !== undefined ? { authorTimeoutMs: opts.authorTimeoutMin * 60_000 } : {}),
       ...(opts.model !== undefined ? { model: opts.model } : {}),
@@ -218,6 +318,9 @@ export function makeDriver(spec: string, opts: DriverLimits & DriverModels = {})
       ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(opts.authorModel !== undefined ? { authorModel: opts.authorModel } : {}),
       ...(opts.askModel !== undefined ? { askModel: opts.askModel } : {}),
+      ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+      ...(opts.authorEffort !== undefined ? { authorEffort: opts.authorEffort } : {}),
+      ...(opts.askEffort !== undefined ? { askEffort: opts.askEffort } : {}),
     });
   }
   throw new Error(`unknown driver \`${spec}\` (claude, codex, external:COMMAND, recorded:FILE)`);
@@ -242,14 +345,29 @@ export async function main(argv: readonly string[]): Promise<number> {
     library: libraryOf(cardsDir, repo),
   });
   for (const r of refusals) console.error(formatRefusal(r));
-  const chosen = args.only ? cards.filter((c) => args.only!.includes(c.card.id)) : cards;
-  if (chosen.length === 0) {
+  const picked = args.only ? cards.filter((c) => args.only!.includes(c.card.id)) : cards;
+  if (picked.length === 0) {
     console.error(`no card to run under ${cardsDir}${args.only ? ` matching ${args.only.join(',')}` : ''}`);
+    return 2;
+  }
+  const promptChoice = promptChoiceOf(args);
+  // A card that lacks a text the run would render in the chosen language is skipped here, before any scaffold or boot; the others run.
+  const chosen = picked.filter((c) => {
+    const refusal = promptLanguageRefusal(c.card, promptChoice, args.modes);
+    if (refusal) console.error(`skipped ${c.card.id}: ${refusal}`);
+    return refusal === undefined;
+  });
+  if (chosen.length === 0) {
+    console.error(`no card to run: every card chosen lacks a text the run would send in ${args.lang}`);
     return 2;
   }
 
   const live = makeDriver(args.driver, args);
-  const driver = args.record ? new RecordingDriver(live) : live;
+  // A replay reads the first N asks of each question turn: refused here, before any card runs, when it holds fewer.
+  if (args.askRepeats !== undefined && live instanceof RecordedDriver) live.assertAskRepeats(args.askRepeats, chosen.map((c) => c.card));
+  // A replay under other prompts than its recording's would grade one choice's answers as another's: refused here, before any card runs.
+  if (live instanceof RecordedDriver) live.assertPromptChoice(promptChoice);
+  const driver = args.record ? new RecordingDriver(live, promptChoice) : live;
   const info = driver.info();
   console.log(
     `driver: ${info.driver} ${info.version ?? ''} · login: ${info.authMethod ?? 'n/a'} · API-billed: no` +
@@ -257,8 +375,12 @@ export async function main(argv: readonly string[]): Promise<number> {
       (info.authorMaxTurns ? ` · author max turns: ${Object.entries(info.authorMaxTurns).map(([tier, n]) => `${tier} ${n}`).join(', ')}` : '') +
       (info.askMaxTurns !== undefined ? ` · ask max turns: ${info.askMaxTurns}` : '') +
       (info.authorModel ? ` · author model: ${info.authorModel}` : '') +
-      (info.askModel ? ` · ask model: ${info.askModel}` : ''),
+      (info.askModel ? ` · ask model: ${info.askModel}` : '') +
+      (info.authorEffort ? ` · author effort: ${info.authorEffort}` : '') +
+      (info.askEffort ? ` · ask effort: ${info.askEffort}` : ''),
   );
+  if (args.askRepeats !== undefined && args.askRepeats > 1) console.log(`ask repeats: each question turn asked ${args.askRepeats} times, operations once`);
+  if (promptChoice) console.log(`prompts: ${promptChoiceText(promptChoice)}`);
 
   // Built and packed once, before the first card: every scaffold of this run installs the same tarballs.
   const workspace = args.packages === 'workspace' ? await prepareWorkspacePackages(repo, join(work, 'workspace-packages')) : undefined;
@@ -296,10 +418,17 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   const date = new Date().toISOString().slice(0, 10);
 
-  for (const scenario of chosen) {
+  for (const loaded of chosen) {
+    // The card's dates move onto the day this card starts, so its "today", its
+    // seeded rows and the app's own clock agree (`run-date.ts`).
+    const runDate = new Date().toISOString().slice(0, 10);
+    const scenario = rebaseScenario(loaded, runDate);
     console.log(`\n▶ ${scenario.card.id} (${args.modes.join(' + ')})`);
+    if (loaded.card.asOf !== undefined && loaded.card.asOf !== scenario.card.asOf) {
+      console.log(`dates: the card's ${loaded.card.asOf} is run as ${scenario.card.asOf}, every card date moved by the same days`);
+    }
     publishedVersions = new Set();
-    const cardRun = await runCard(scenario, driver, ops, { modes: args.modes, iterateRun: args.iterateRun, admin: ADMIN, ...(template ? { templateArtifact: template } : {}) });
+    const cardRun = await runCard(scenario, driver, ops, { modes: args.modes, iterateRun: args.iterateRun, admin: ADMIN, ...(template ? { templateArtifact: template } : {}), ...(args.askRepeats !== undefined ? { askRepeats: args.askRepeats } : {}), ...(promptChoice ? { promptChoice } : {}) });
     const packages: PackageSource = workspace ? workspace.source : { source: 'published', versions: [...publishedVersions].sort() };
     const record = runRecord({ run: `${date}-scenario-${scenario.card.id}`, date, ...(framework ? { framework } : {}), packages, driver: info, runner: 'scenario-runner', evidenceDir: work }, cardRun);
     const file = join(outDir, `${date}-scenario-${scenario.card.id}.json`);

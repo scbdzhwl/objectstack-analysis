@@ -55,9 +55,12 @@
  *    the other, and `/meta/webhook/NAME` served the same one (both since
  *    narrowed to the namespace: "The narrowing");
  *  - `connector` — `/meta/connector/NAME` (the by-name door the designer's
- *    connector picker reads) serves the FIRST-registered package's
- *    declaration; a provider-bound instance is the engine's one connector
- *    per name, and a second one at boot already refuses the boot (ADR-0097);
+ *    connector picker reads) served the FIRST-registered package's
+ *    declaration, and a provider-bound instance was the engine's one
+ *    connector per name, a second one at boot refusing the boot (ADR-0097)
+ *    (since narrowed to the namespace: "The narrowing", #31699 — the engine
+ *    holds an instance per `(package, name)`, and a flow, a pull and the
+ *    connection door address one by package);
  *  - `email_template` — a send's `template: NAME` resolved the
  *    FIRST-registered package's bundle, and `/meta/email_template/NAME`
  *    served the same one (both since narrowed to the namespace: "The
@@ -207,6 +210,18 @@
  * D3) and refuses two holders, naming them (`packages/spec/liveness/tool.json`
  * records that precondition).
  *
+ * `connector` followed last (#31699 PR 3), so every covered type has now
+ * narrowed. The automation engine holds a connector instance per
+ * `(package, name)`, and the declared-connector reconcile materializes each
+ * package's entry under its package; an entry with no package of its own
+ * is the instance of the package the name resolves to, and under two holders
+ * it is refused naming both, never materialized as either. A flow's
+ * `connector_action` resolves its connector from the flow's package, a
+ * connector pull from the package that holds its mapping, and the
+ * connection door connects the instance its namespace address names
+ * (`/automation/connectors/NS/NAME/connection`); `/meta/connector/NAME` and
+ * the bare connection door refuse a name two packages hold, naming both.
+ *
  * Two holdings still meet under a narrowed type, whatever the namespaces:
  *
  *  - a name the platform requests by its bare spelling
@@ -239,8 +254,10 @@
  *    (ADR-0146 D9): a stored row bound to its pair, hydrated into the bare
  *    slot — the environment catalog, never a package holder.
  *  - A provider-bound connector instance two packages of ONE boot declare:
- *    the automation service's own duplicate refusal (ADR-0097) stops that boot
- *    before the seal; the doors here judge the install that follows a boot.
+ *    the automation service materializes each package's under its package
+ *    (ADR-0150 D9, #31699), and refuses an entry with no package of its own
+ *    under such a name, and a name declared twice within one package
+ *    (ADR-0097); the doors here judge the install that follows a boot.
  *  - Every type not in {@link BARE_NAME_ONE_HOLDER_TYPES}: §3.4's coexistence
  *    stands for them (package-scoped resolution, a key that carries the object,
  *    the job key `appId:jobName`).
@@ -253,6 +270,7 @@ import {
   BARE_NAME_ONE_HOLDER_TYPES,
   isPackageScopedType,
   isPlatformRequestedBareName,
+  PLATFORM_REQUESTED_BARE_NAMES_BY_TYPE,
   OVERRIDABLE_BASELINE_PACKAGES,
   isBareNameOneHolderType,
   isOverridableBaseline,
@@ -587,7 +605,9 @@ export function bareNameTypeLabel(type: BareNameOneHolderType): string {
 
 /**
  * How each covered type's consumer names it with no package — the clause a
- * refusal's reason carries for the types it lists.
+ * refusal's reason carries for a type still held one name per deployment (not
+ * in {@link NAMESPACE_SCOPED_BARE_NAME_TYPES}; a narrowed type's reason states
+ * the namespace rule instead).
  */
 const CONSUMER_CLAUSE: Readonly<Record<BareNameOneHolderType, string>> = Object.freeze({
   picklist: 'a field names its picklist',
@@ -626,20 +646,82 @@ const joinList = (parts: readonly string[]): string =>
   parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 
 /**
- * Why a second holder is refused, in one sentence a reader can act on — for
- * the covered types `types` lists (every covered type when none), in the
- * order {@link BARE_NAME_ONE_HOLDER_TYPES} lists them. Shared by the doors'
- * refusal and the cold boot's warning.
+ * The holdings of a narrowed type that still meet whatever their namespaces
+ * ("Two holdings still meet under a narrowed type", above), as the clauses a
+ * reason states them in — empty for a type with neither. Read from the same
+ * tables {@link bareNameHoldersMeet} and the registry's bundle-addition read
+ * ask: the names the platform requests by their bare spelling
+ * (`PLATFORM_REQUESTED_BARE_NAMES_BY_TYPE`), and a bundle's addition
+ * ({@link isBundleAdditionPair}), for a type whose items are keyed by a
+ * discriminator (`ITEM_KEY_DISCRIMINATORS`).
+ */
+function crossNamespaceExceptionClauses(type: BareNameOneHolderType): string[] {
+  const clauses: string[] = [];
+  const requested = isPackageScopedType(type) ? (PLATFORM_REQUESTED_BARE_NAMES_BY_TYPE[type] ?? []) : [];
+  if (requested.length > 0) {
+    clauses.push(
+      `a name the platform requests by its bare spelling (${joinList(requested.map((n) => `"${n}"`))}) keeps one ` +
+      'holder per deployment',
+    );
+  }
+  const disc = ITEM_KEY_DISCRIMINATORS[type];
+  if (disc !== undefined && isBareNameRegistryType(type)) {
+    const noun = TYPE_NOUN[type].replace(/^an? /, '');
+    clauses.push(
+      `a package that depends on the name's holder (which does not depend on it back) and ships the name only in ` +
+      `${disc.field}s the holder does not ship is refused as an addition to the holder's ${noun}`,
+    );
+  }
+  return clauses;
+}
+
+/**
+ * Why a second holder is refused, in one sentence a reader can act on per
+ * rule — for the covered types `types` lists (every covered type when none),
+ * in the order {@link BARE_NAME_ONE_HOLDER_TYPES} lists them. Shared by the
+ * doors' refusal and the cold boot's warning.
+ *
+ * A narrowed type ({@link NAMESPACE_SCOPED_BARE_NAME_TYPES}, "The narrowing")
+ * is told its own rule: one holder per namespace, another namespace may ship
+ * the name, and a bare name two holders share is refused naming both; a
+ * narrowed type whose holdings can still meet across namespaces is told
+ * those exceptions too ({@link crossNamespaceExceptionClauses}). A type
+ * not yet narrowed keeps the one-name-per-deployment sentence and its
+ * consumers' clause. A list carrying both gets one sentence per rule, the
+ * narrowed one first.
  */
 export function bareNameReason(types: readonly BareNameOneHolderType[] = BARE_NAME_ONE_HOLDER_TYPES): string {
   const present = BARE_NAME_ONE_HOLDER_TYPES.filter((t) => types.includes(t));
   const listed = present.length > 0 ? present : BARE_NAME_ONE_HOLDER_TYPES;
-  const nouns = joinList(listed.map((t) => TYPE_NOUN[t]));
-  return (
-    `${nouns.charAt(0).toUpperCase()}${nouns.slice(1)} ${listed.length === 1 ? 'holds' : 'each hold'} one name per ` +
-    `deployment: ${joinList(listed.map((t) => CONSUMER_CLAUSE[t]))}, with no package to tell two definitions ` +
-    'apart, so with two holders every caller is served the same one, chosen by registration order.'
-  );
+  const subject = (group: readonly BareNameOneHolderType[]): string => {
+    const nouns = joinList(group.map((t) => TYPE_NOUN[t]));
+    return `${nouns.charAt(0).toUpperCase()}${nouns.slice(1)} ${group.length === 1 ? 'holds' : 'each hold'}`;
+  };
+  const narrowed = listed.filter((t) => isNamespaceScopedBareNameType(t));
+  const perDeployment = listed.filter((t) => !isNamespaceScopedBareNameType(t));
+  const sentences: string[] = [];
+  if (narrowed.length > 0) {
+    const exceptions = narrowed
+      .map((t) => ({ t, clauses: crossNamespaceExceptionClauses(t) }))
+      .filter(({ clauses }) => clauses.length > 0);
+    sentences.push(
+      `${subject(narrowed)} one name per namespace: a package of another namespace may ship the same name` +
+      `${exceptions.length > 0 ? ', save the exceptions below' : ''}, but within one namespace, or beside a ` +
+      'package that declares no namespace, a name has one holder, and a bare name two holders share is refused ' +
+      'naming both.',
+    );
+    for (const { t, clauses } of exceptions) {
+      sentences.push(`For ${TYPE_NOUN[t]}, whatever the namespaces: ${joinList(clauses)}.`);
+    }
+  }
+  if (perDeployment.length > 0) {
+    sentences.push(
+      `${subject(perDeployment)} one name per deployment: ` +
+      `${joinList(perDeployment.map((t) => CONSUMER_CLAUSE[t]))}, with no package to tell two definitions ` +
+      'apart, so with two holders every caller is served the same one, chosen by registration order.',
+    );
+  }
+  return sentences.join(' ');
 }
 
 /** A stable identity for de-duplicating holders. */

@@ -11,7 +11,13 @@ import { describe, it, expect } from 'vitest';
 import { assertEngineDeleteDispatch, assertEngineFindOnePredicate, type EngineFindOneQueryInput } from '@objectstack/objectql';
 import { AutomationEngine } from './engine.js';
 import type { StepLogEntry, NodeExecutor, RunRecord } from './engine.js';
-import { summarizeRun, formatRunSummaryLine } from './run-summary.js';
+import {
+    summarizeRun,
+    formatRunSummaryLine,
+    MAX_NODE_SUMMARY_WARNINGS,
+    MAX_NODE_SUMMARY_WARNING_LENGTH,
+    NODE_SUMMARY_WARNING_CUT_MARKER,
+} from './run-summary.js';
 import { InMemorySuspendedRunStore, ObjectStoreSuspendedRunStore } from './suspended-run-store.js';
 import { registerCrudNodes } from './builtin/crud-nodes.js';
 import { registerLoopNode } from './builtin/loop-node.js';
@@ -132,6 +138,90 @@ describe('summarizeRun', () => {
             step({ nodeId: 'w', nodeType: 'update_record', status: 'failure', metrics: { acted: 7 } }),
         ]);
         expect(s.acted).toBe(7);
+    });
+});
+
+describe('summarizeRun carries each node\'s step warnings onto its row', () => {
+    const refused = "notify delivered nothing: every delivery it attempted failed. channel 'push': not registered.";
+
+    it('folds a node\'s warnings across its executions: distinct texts, first-seen order', () => {
+        const s = summarizeRun([
+            step({ nodeId: 'nudge', nodeType: 'notify', warnings: [refused], metrics: { selected: 1, acted: 0 } }),
+            step({ nodeId: 'nudge', nodeType: 'notify', warnings: ['second', refused], metrics: { selected: 1, acted: 0 } }),
+            step({ nodeId: 'nudge', nodeType: 'notify', metrics: { selected: 1, acted: 1 } }),
+        ]);
+        expect(s.nodes[0]).toMatchObject({ nodeId: 'nudge', runs: 3, status: 'success', warnings: [refused, 'second'] });
+    });
+
+    it('keeps warnings on the node that raised them and leaves every other row without the member', () => {
+        const s = summarizeRun([
+            step({ nodeId: 'write', nodeType: 'update_record', warnings: ['dropped'], metrics: { acted: 1 } }),
+            step({ nodeId: 'gate', nodeType: 'decision' }),
+            step({ nodeId: 'nudge', nodeType: 'notify', status: 'skipped', skippedBy: { nodeId: 'gate' } }),
+        ]);
+        expect(s.nodes.find((n) => n.nodeId === 'write')!.warnings).toEqual(['dropped']);
+        expect('warnings' in s.nodes.find((n) => n.nodeId === 'gate')!).toBe(false);
+        expect('warnings' in s.nodes.find((n) => n.nodeId === 'nudge')!).toBe(false);
+    });
+
+    it('carries a failed execution\'s warnings too', () => {
+        const s = summarizeRun([step({ nodeId: 'w', nodeType: 'update_record', status: 'failure', warnings: ['partial'] })]);
+        expect(s.nodes[0]).toMatchObject({ status: 'failure', warnings: ['partial'] });
+    });
+
+    it('bounds the list per node and says how many distinct texts it left out', () => {
+        const steps = Array.from({ length: MAX_NODE_SUMMARY_WARNINGS + 3 }, (_, i) =>
+            step({ nodeId: 'nudge', nodeType: 'notify', warnings: [`failed (${i + 1})`], parentNodeId: 'each', iteration: i }),
+        );
+        const warnings = summarizeRun(steps).nodes[0].warnings!;
+        expect(warnings).toHaveLength(MAX_NODE_SUMMARY_WARNINGS + 1);
+        expect(warnings.slice(0, MAX_NODE_SUMMARY_WARNINGS)).toEqual(
+            Array.from({ length: MAX_NODE_SUMMARY_WARNINGS }, (_, i) => `failed (${i + 1})`),
+        );
+        expect(warnings[MAX_NODE_SUMMARY_WARNINGS]).toMatch(/^3 more distinct warnings/);
+    });
+
+    it('a list exactly at the bound is published whole, with no overflow entry', () => {
+        const steps = Array.from({ length: MAX_NODE_SUMMARY_WARNINGS }, (_, i) =>
+            step({ nodeId: 'nudge', nodeType: 'notify', warnings: [`w${i}`] }),
+        );
+        expect(summarizeRun(steps).nodes[0].warnings).toEqual(Array.from({ length: MAX_NODE_SUMMARY_WARNINGS }, (_, i) => `w${i}`));
+    });
+});
+
+describe('summarizeRun bounds each warning text on a node\'s row', () => {
+    const rowOf = (warnings: string[]) =>
+        summarizeRun([step({ nodeId: 'nudge', nodeType: 'notify', warnings })]).nodes[0].warnings!;
+
+    it('cuts a text past the bound to exactly the bound, ending with the cut marker', () => {
+        const long = `channel 'email': ${'x'.repeat(MAX_NODE_SUMMARY_WARNING_LENGTH * 4)}`;
+        const [cut] = rowOf([long]);
+        expect(cut).toHaveLength(MAX_NODE_SUMMARY_WARNING_LENGTH);
+        expect(cut.endsWith(NODE_SUMMARY_WARNING_CUT_MARKER)).toBe(true);
+        expect(long.startsWith(cut.slice(0, -NODE_SUMMARY_WARNING_CUT_MARKER.length))).toBe(true);
+    });
+
+    it('a text exactly at the bound is published whole, with no marker', () => {
+        const atBound = 'y'.repeat(MAX_NODE_SUMMARY_WARNING_LENGTH);
+        expect(rowOf([atBound])).toEqual([atBound]);
+    });
+
+    it('two long texts that agree up to the cut fold into one entry', () => {
+        const prefix = 'z'.repeat(MAX_NODE_SUMMARY_WARNING_LENGTH);
+        const s = summarizeRun([
+            step({ nodeId: 'nudge', nodeType: 'notify', warnings: [`${prefix} first tail`] }),
+            step({ nodeId: 'nudge', nodeType: 'notify', warnings: [`${prefix} second tail`] }),
+        ]);
+        expect(s.nodes[0].warnings).toHaveLength(1);
+    });
+
+    it('never splits a surrogate pair at the cut', () => {
+        const end = MAX_NODE_SUMMARY_WARNING_LENGTH - NODE_SUMMARY_WARNING_CUT_MARKER.length;
+        // An astral character whose high surrogate sits on the last kept unit.
+        const text = `${'a'.repeat(end - 1)}\u{1F600}${'b'.repeat(50)}`;
+        const [cut] = rowOf([text]);
+        expect(cut.endsWith(NODE_SUMMARY_WARNING_CUT_MARKER)).toBe(true);
+        expect(cut.slice(0, -NODE_SUMMARY_WARNING_CUT_MARKER.length)).toBe('a'.repeat(end - 1));
     });
 });
 

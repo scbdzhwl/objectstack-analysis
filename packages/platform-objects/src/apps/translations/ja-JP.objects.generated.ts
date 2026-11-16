@@ -120,7 +120,8 @@ export const jaJPObjects: NonNullable<TranslationData['objects']> = {
         help: "この ID の作成方法 — idp_provisioned（フェデレーション SSO の JIT）または env_native（ローカルサインアップ／アプリのエンドユーザー）。システム管理のため編集しないでください。",
         options: {
           idp_provisioned: "IdP プロビジョニング",
-          env_native: "ローカルアカウント"
+          env_native: "ローカルアカウント",
+          idp_pending: "Pending SSO Sign-In"
         }
       },
       id: {
@@ -214,6 +215,54 @@ export const jaJPObjects: NonNullable<TranslationData['objects']> = {
             "user.phoneNumber": "電話番号",
             permissionSet: "権限セット",
             temporaryPassword: "一時パスワード：今すぐコピーしてください。表示は一度きりで、保存されません"
+          }
+        }
+      },
+      add_sso_user: {
+        label: "ユーザーを追加",
+        description: "初回サインインの前に、メールアドレスで追加します。追加された人は組織の ID プロバイダー経由でサインインします。ここではパスワードを設定しません。",
+        params: {
+          positions: {
+            label: "役職",
+            helpText: "任意。追加された時点からこの人が就く役職です。"
+          },
+          permissionSets: {
+            label: "権限セット",
+            helpText: "任意。この権限セットを付与し、初回サインイン時からアプリを開けるようにします。"
+          },
+          manager: {
+            label: "上司のメールアドレス",
+            helpText: "任意。この人の上司のメールアドレス（この環境のユーザー）。"
+          }
+        },
+        resultDialog: {
+          title: "ユーザーを追加しました",
+          acknowledge: "完了",
+          fields: {
+            email: "メールアドレス",
+            notApplied: "保留中のため適用されませんでした（レコードで設定してください）",
+            managerError: "上司",
+            "host.reason": "招待は送信されませんでした"
+          }
+        }
+      },
+      import_sso_users: {
+        label: "ユーザーをインポート",
+        description: "CSV テキストから複数の人をまとめて追加します。各行は個別に追加されるため、不正な行だけが失敗します。追加された人は組織の ID プロバイダー経由でサインインします。ここではパスワードを設定しません。",
+        params: {
+          csv: {
+            label: "CSV",
+            helpText: "1 行目はヘッダー行、その後は 1 行に 1 人、最大 500 行。列：email、name、positions と permission_sets（; 区切りのマシン名）、manager_id（上司のメールアドレス）。"
+          }
+        },
+        resultDialog: {
+          title: "インポートが完了しました",
+          acknowledge: "完了",
+          fields: {
+            "summary.added": "追加済み",
+            "summary.alreadyPending": "保留中のため再通知",
+            "summary.failed": "未追加",
+            rows: "行ごとの結果"
           }
         }
       },
@@ -400,7 +449,7 @@ export const jaJPObjects: NonNullable<TranslationData['objects']> = {
   sys_session: {
     label: "セッション",
     pluralLabel: "セッション",
-    description: "アクティブなユーザーセッション",
+    description: "ユーザーセッション",
     fields: {
       user_id: {
         label: "ユーザー"
@@ -2167,6 +2216,18 @@ export const jaJPObjects: NonNullable<TranslationData['objects']> = {
             label: "ディスカバリ URL",
             helpText: "任意。OIDC ディスカバリドキュメントの URL（https）。空欄の場合は `<issuer>/.well-known/openid-configuration` を導出します。ここで指定したエンドポイントはこのプロバイダーで信頼されます。"
           },
+          authorizationEndpoint: {
+            label: "Authorization URL",
+            helpText: "Optional. OIDC authorization endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names an authorization host the server does not trust."
+          },
+          tokenEndpoint: {
+            label: "Token URL",
+            helpText: "Optional. OIDC token endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a token host the server does not trust. Google: https://oauth2.googleapis.com/token"
+          },
+          jwksEndpoint: {
+            label: "JWKS URL",
+            helpText: "Optional. URL of the IdP’s signing-key set (JWKS, https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a key-set host the server does not trust. Google: https://www.googleapis.com/oauth2/v3/certs"
+          },
           userInfoEndpoint: {
             label: "Userinfo エンドポイント URL",
             helpText: "任意。OIDC userinfo エンドポイントの URL（https）。ディスカバリドキュメントが示すものの代わりに使われます。ここで指定したエンドポイントはこのプロバイダーで信頼されます。ディスカバリドキュメントが示す userinfo ホストをサーバーが信頼せず登録が拒否された場合に指定してください。"
@@ -2253,6 +2314,11 @@ export const jaJPObjects: NonNullable<TranslationData['objects']> = {
             label: "マッピング: グループ属性",
             helpText: "任意。ユーザーのグループを含むアサーション属性。サインインのたびに、それらのグループにマッピングされた権限セットが付与されます。空欄の場合、グループはマッピングされません。",
             placeholder: "groups"
+          },
+          mapAccountKey: {
+            label: "Map: Account key attribute",
+            helpText: "Optional. Assertion attribute with one stable value per person that the IdP sets and the user cannot edit (Entra ID object id, Okta user id; never an email, name or other attribute a user can change), used as the account key instead of the NameID, so a sign-in from your sign-in page and one from the IdP’s app portal reach the same account, and an email change keeps it. Leave blank for the default: Microsoft Entra ID (IdP Entity ID on sts.windows.net or login.microsoftonline.com) uses http://schemas.microsoft.com/identity/claims/objectidentifier, every other IdP the NameID. Set it when the provider is registered: accounts already made keep the key they were made with.",
+            placeholder: "http://schemas.microsoft.com/identity/claims/objectidentifier"
           }
         }
       },

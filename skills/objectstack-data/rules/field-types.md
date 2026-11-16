@@ -27,8 +27,7 @@ const fields = {
 > **Config columns list only real `FieldSchema` keys.** Per-type display knobs
 > beyond these do **not** exist — an unknown field key is REFUSED at parse
 > (`unrecognized_keys`), so don't invent `theme`, `rows`,
-> `vectorConfig` or `fileAttachmentConfig`. Source of truth:
-> `node_modules/@objectstack/spec/src/data/field.zod.ts`.
+> `vectorConfig` or `fileAttachmentConfig`.
 
 ## Text & Content
 
@@ -50,7 +49,7 @@ const fields = {
 | Type | When to Use | Config |
 |:-----|:------------|:-------|
 | `number` | Generic numeric value | `min`, `max`, `precision`, `scale` |
-| `currency` | Monetary amounts | `currencyConfig` (currencyMode, defaultCurrency, currencyField, homeAmount) |
+| `currency` | Monetary amounts | `currencyConfig` (→ Currency) |
 | `percent` | Percentage; stored as a fraction (0-1) unless the field declares `max` above 1 (`max: 100`), then whole points; seeds, defaults, API values use that scale | `min`, `max`, `precision`, `percentDisplay` — the read-only face: unset or `'bar'` draws a progress bar, `'plain'` the number alone, for a rate or a probability |
 
 ## Date & Time
@@ -93,7 +92,7 @@ options: [
 | `lookup` | Reference another object (independent) | `reference`, `lookupFilters`, `multiple`, `deleteBehavior`, `lookupAutofill` |
 | `master_detail` | Parent–child with lifecycle control | `reference`, `deleteBehavior` (`cascade`/`restrict` — `set_null` is refused), `lookupAutofill` |
 | `tree` | Hierarchical self-reference | `reference` — optional; when written, this object's own name (any other object is refused at parse) |
-| `user` | Person picker — a lookup specialized to `sys_user` (assignee, watchers). Stored identically to `lookup` | `multiple` (collaborators), `defaultValue: 'current_user'`, `deleteBehavior` (no default; declared, as on `lookup`: relationships.md → Delete Behaviors) |
+| `user` | Person picker — a lookup specialized to `sys_user` (reviewer, watchers). Stored identically to `lookup` | `multiple` (collaborators), `defaultValue: 'current_user'`, `deleteBehavior` (no default; declared, as on `lookup`: relationships.md → Delete Behaviors) |
 
 **`lookupAutofill: [{ target, source, overwrite? }]`** (single-value `lookup` /
 `master_detail`): a pick copies the picked record's `source` into this object's
@@ -128,7 +127,7 @@ Stored as JSON on the parent row — no separate table / FK:
 
 | Type | When to Use | Config |
 |:-----|:------------|:-------|
-| `formula` | Computed on read: neither aggregatable nor a dataset or cube dimension (group key); both need a stored field of its return type with the same `expression` (objectstack-ui → Dashboards → Dataset-Bound Widgets) | `expression` (CEL, `record.` prefixes), `returnType` (`'number' \| 'text' \| 'boolean' \| 'date' \| 'currency'`); `'currency'` carries its own `currencyConfig` |
+| `formula` | Computed on read: neither aggregatable nor a dataset or cube dimension (group key); both need a stored field of its return type with the same `expression` (objectstack-ui → Dashboards → Dataset-Bound Widgets) that reads only its own row (relationships.md → Computed column) | `expression` (CEL, `record.` prefixes), `returnType` (`'number' \| 'text' \| 'boolean' \| 'date' \| 'currency'`); `'currency'` carries its own `currencyConfig` |
 | `summary` | Roll-up aggregation from child records | `summaryOperations` ({ object, field? (omit for `count`), function, relationshipField?, filter? }) |
 | `autonumber` | Auto-incrementing display format ({0000} counter + optional date / {field} tokens, resets per scope) | `format` (shorthand) / `autonumberFormat` (canonical) — e.g., `"CASE-{0000}"`, `"AD{YYYYMMDD}{0000}"` |
 
@@ -177,6 +176,19 @@ home-currency amount in `field` (a `'dynamic'` `currency`) at the `rateDate`
 (`date`/`datetime`) rate, and that rate in `rateField` (`number`), both
 `readonly: true`. Cross-currency totals sum `field`.
 
+**A roll-up of the home field.** A `sum` / `min` / `max` / `avg` `summary` over a
+child's `homeAmount.field` declares `currencyMode: 'dynamic'`, no `defaultCurrency`
+(ADR-0144: metadata never names the home currency, so never `'fixed'` with it).
+It shows in `localization.currency`; undeclared, a bare number. `defineStack`
+(`os validate`, the build) refuses `'dynamic'` on any other roll-up, and any
+`currencyConfig` on a `count`.
+
+```typescript
+// on project; expense.amount_home is the expense amount's homeAmount.field
+actual_cost: Field.summary({ summaryOperations: { object: 'expense', field: 'amount_home', function: 'sum' },
+  currencyConfig: { currencyMode: 'dynamic' } }),
+```
+
 **A line in its parent's currency.** On a `master_detail` child, `currencyField`
 may be `'<master_detail field>.<parent code field>'`: one hop (a `lookup` path
 is refused) to the parent's `iso_4217_currency` field. The line stores no code:
@@ -221,13 +233,6 @@ const total = {
 ```
 
 ### Autonumber
-
-```typescript
-{
-  type: 'autonumber',
-  format: 'CASE-{0000}',
-}
-```
 
 The `format` is literal text interleaved with `{...}` tokens:
 

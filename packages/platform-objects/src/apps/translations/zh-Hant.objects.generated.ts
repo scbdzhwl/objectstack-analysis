@@ -120,7 +120,8 @@ export const zhHantObjects: NonNullable<TranslationData['objects']> = {
         help: "該身分的建立方式——idp_provisioned（聯合 SSO 即時開通）或 env_native（本地註冊 / 應用程式終端使用者）。系統維護，請勿編輯。",
         options: {
           idp_provisioned: "IdP 開通",
-          env_native: "本地帳號"
+          env_native: "本地帳號",
+          idp_pending: "Pending SSO Sign-In"
         }
       },
       id: {
@@ -214,6 +215,54 @@ export const zhHantObjects: NonNullable<TranslationData['objects']> = {
             "user.phoneNumber": "手機號",
             permissionSet: "權限集",
             temporaryPassword: "臨時密碼：請立即複製，它只顯示一次，不會被儲存"
+          }
+        }
+      },
+      add_sso_user: {
+        label: "新增使用者",
+        description: "在對方首次登入前依電子郵件地址新增。對方透過你所屬組織的身分識別提供者登入；這裡不設定密碼。",
+        params: {
+          positions: {
+            label: "職位",
+            helpText: "選填。此人從被新增起即擔任的職位。"
+          },
+          permissionSets: {
+            label: "權限集",
+            helpText: "選填。將此權限集授予此人，讓對方首次登入即可開啟自己的應用程式。"
+          },
+          manager: {
+            label: "主管電子郵件",
+            helpText: "選填。此人主管的電子郵件地址，須為本環境中的使用者。"
+          }
+        },
+        resultDialog: {
+          title: "已新增使用者",
+          acknowledge: "完成",
+          fields: {
+            email: "電子郵件",
+            notApplied: "此人仍待啟用，以下內容未套用（請在其記錄上設定）",
+            managerError: "主管",
+            "host.reason": "邀請未送出"
+          }
+        }
+      },
+      import_sso_users: {
+        label: "匯入使用者",
+        description: "從 CSV 文字一次新增多人。每一列各自新增，某一列出錯只影響該列。他們透過你所屬組織的身分識別提供者登入；這裡不設定密碼。",
+        params: {
+          csv: {
+            label: "CSV",
+            helpText: "第一列為標題列，之後每列一人，最多 500 列。欄位：email、name、positions 與 permission_sets（機器名稱，以 ; 分隔）以及 manager_id（主管的電子郵件地址）。"
+          }
+        },
+        resultDialog: {
+          title: "匯入完成",
+          acknowledge: "完成",
+          fields: {
+            "summary.added": "已新增",
+            "summary.alreadyPending": "已在待啟用中，已再次通知",
+            "summary.failed": "未新增",
+            rows: "逐列結果"
           }
         }
       },
@@ -400,7 +449,7 @@ export const zhHantObjects: NonNullable<TranslationData['objects']> = {
   sys_session: {
     label: "工作階段",
     pluralLabel: "工作階段",
-    description: "活躍的使用者工作階段",
+    description: "使用者工作階段",
     fields: {
       user_id: {
         label: "使用者"
@@ -2167,6 +2216,18 @@ export const zhHantObjects: NonNullable<TranslationData['objects']> = {
             label: "發現文件 URL",
             helpText: "可選。OIDC 發現文件 URL（https）。留空則推導為 `<issuer>/.well-known/openid-configuration`。在此填寫的端點會被此提供者信任。"
           },
+          authorizationEndpoint: {
+            label: "Authorization URL",
+            helpText: "Optional. OIDC authorization endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names an authorization host the server does not trust."
+          },
+          tokenEndpoint: {
+            label: "Token URL",
+            helpText: "Optional. OIDC token endpoint URL (https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a token host the server does not trust. Google: https://oauth2.googleapis.com/token"
+          },
+          jwksEndpoint: {
+            label: "JWKS URL",
+            helpText: "Optional. URL of the IdP’s signing-key set (JWKS, https), kept instead of the one the discovery document names. An endpoint named here is trusted for this provider: name it when registration is refused because the discovery document names a key-set host the server does not trust. Google: https://www.googleapis.com/oauth2/v3/certs"
+          },
           userInfoEndpoint: {
             label: "Userinfo 端點 URL",
             helpText: "可選。OIDC userinfo 端點 URL（https），取代發現文件中列出的端點。在此填寫的端點會被此提供者信任：當註冊因發現文件列出的 userinfo 主機不受伺服器信任而被拒絕時，請在此填寫。"
@@ -2253,6 +2314,11 @@ export const zhHantObjects: NonNullable<TranslationData['objects']> = {
             label: "對應：群組屬性",
             helpText: "可選。攜帶使用者所屬群組的斷言屬性。每次登入都會授予對應到這些群組的權限集。留空則不對應任何群組。",
             placeholder: "groups"
+          },
+          mapAccountKey: {
+            label: "Map: Account key attribute",
+            helpText: "Optional. Assertion attribute with one stable value per person that the IdP sets and the user cannot edit (Entra ID object id, Okta user id; never an email, name or other attribute a user can change), used as the account key instead of the NameID, so a sign-in from your sign-in page and one from the IdP’s app portal reach the same account, and an email change keeps it. Leave blank for the default: Microsoft Entra ID (IdP Entity ID on sts.windows.net or login.microsoftonline.com) uses http://schemas.microsoft.com/identity/claims/objectidentifier, every other IdP the NameID. Set it when the provider is registered: accounts already made keep the key they were made with.",
+            placeholder: "http://schemas.microsoft.com/identity/claims/objectidentifier"
           }
         }
       },

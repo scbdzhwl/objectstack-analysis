@@ -108,6 +108,7 @@ import {
   SplitPaneGrid,
   ImportWizard,
   InlineEditing,
+  RecordPointerCell,
   FormulaBar,
   GroupRow,
   RowActionMenu,
@@ -135,6 +136,8 @@ import type {
   ImportWizardProps,
   ImportResult,
   InlineEditingProps,
+  RecordPointerCellProps,
+  RecordPointerSource,
   FormulaBarProps,
   GroupRowProps,
   RowActionMenuProps,
@@ -156,6 +159,12 @@ import type {
   ColumnSummaryResult,
 } from '@object-ui/plugin-grid';
 ```
+
+`RecordPointerCell` is the face a `referenceVia` pointer column draws: given an
+(object name, record id) pair and a data source, it names the record by its
+display name, batching every cell's read into one `find` per object. A page
+that lists such pairs outside a grid (the Console's audit log) draws the same
+face.
 
 The *schema* types are not here — they live in `@object-ui/types`
 (`ObjectGridSchema`, `ListColumn`), because the schema is the shared authoring
@@ -890,6 +899,21 @@ export const UserList = ({ needsAccess }: { needsAccess: (id: string) => boolean
 
 The console's Setup → Users list on a cloud-managed environment uses it to mark
 a user who holds no permission set beyond the baseline (objectui#13330).
+
+### Rows that open nothing
+
+A host that owns the row click (`onRowClick`) and knows that it opens nothing
+for these rows passes `rowOpensRecord={false}`. The grid then draws its
+record-link cells (the first column, and any column authored `link: true`) as
+plain text, with no anchor and no ARIA link semantics, and the row's right-click menu
+offers no Open or Open in new tab; the row's actions stay. The row click still
+reaches `onRowClick`, so anything else the host does with it is unchanged.
+On a phone, where the grid draws each row as a card, the card draws no pointer
+and no hover wash, and its "⋮" stays (objectstack#33548). Absent (or `true`),
+every row is drawn as before. It is a host prop, not a
+schema key: list metadata cannot set it. The console passes `false` for a view
+authored `navigation: { mode: 'none' }` and for an object whose data API serves
+no single-record read (objectstack#33317).
 
 ### Inline Editing
 

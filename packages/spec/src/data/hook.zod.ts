@@ -33,10 +33,19 @@ import {
   HOOK_REFUSAL_CODE_PATTERN,
   HOOK_REFUSAL_MESSAGE_HOLE_REFUSED,
   HOOK_REFUSAL_MESSAGE_WITHOUT_HOLE,
+  HOOK_REFUSAL_PARAM_PATTERN,
+  HOOK_REFUSAL_REASON_PATTERN,
   hookRefusalCodesThrownIn,
+  hookRefusalReasonsThrownIn,
   hookRefusalsWithoutSandboxedBody,
   undeclaredHookRefusalCodeAtSave,
+  undeclaredHookRefusalReasonAtSave,
 } from './hook-refusal-codes';
+// [#33214] The closed-scope `{{ }}` judge a refusal message with declared
+// `params` is read by — the one the action copy slots and a bulk action's
+// `confirmText` use, over the same hole grammar the flow `end` refusal
+// renders. It imports nothing outside its own leaf.
+import { closedScopeTemplateRefusal } from '../automation/flow-text-slot-template';
 
 /*
  * ── Unknown-key strictness (#4001 data step) ────────────────────────────────
@@ -237,65 +246,177 @@ function refuseHookBodyMailGrant(
  * ── A hook that declares `refusals` refuses by code only ────────────────────
  *
  * [#26170, maintainer ruling 6431311681 letter A] A hook's refusal catalogue
- * names every refusal its body may throw. The runtime answers a declared code
+ * names every refusal its code may throw. The runtime answers a declared code
  * with the declared message in the caller's locale; it refuses a code the
- * catalogue does not declare, loudly. Where the body names the code literally
- * in a `throw` (`hookRefusalCodesThrownIn`), the save decides it first: the
- * parse refuses the hook at every door that parses one — the metadata save
- * door, `defineStack` / `os validate`, compile, an artifact's parse — so the
- * author meets the refusal before any write does. One issue per code, at
- * `body.source`. A code that arrives any other way is the run-time refusal's.
+ * catalogue does not declare, loudly. Where the hook's source names the code
+ * literally in a `throw` (`hookRefusalCodesThrownIn`), the save decides it
+ * first: the parse refuses the hook at every door that parses one — the
+ * metadata save door, `defineStack` / `os validate`, compile, an artifact's
+ * parse — so the author meets the refusal before any write does. One issue per
+ * code. A code that arrives any other way is the run-time refusal's. The same
+ * holds for a reason under a code that declares `reasons` (#33214,
+ * `hookRefusalReasonsThrownIn`); under a code that declares none, a thrown
+ * `reason` is not read at all, as before.
  *
- * A catalogue is answered only on the sandboxed `body` path, so `refusals` on
- * a hook with no `js` body — an in-process `handler`, or an `expression` body
- * that cannot throw a code — is refused at `refusals`: the catalogue would be
- * demanded by `os i18n` and served by nobody.
+ * [#33214, ruling 6879477573 letter A] The catalogue is answered on every path
+ * a hook runs on: a sandboxed `js` body, and an in-process `handler` — an
+ * inline function (`os build` lowers it to a `js` body; a source boot runs it
+ * in-process) or the string reference the build leaves when it cannot lower
+ * one. The source a save reads is the code that runs: a `js` body's `source`
+ * (a body wins over a handler at bind), else an inline handler's own source,
+ * which is the text the build's lowering peels. A string reference names code
+ * the save cannot read, so its codes are the run-time refusal's alone. Only a
+ * hook whose code cannot throw a code — an `expression` body, or neither a body
+ * nor a handler — is refused at `refusals`: the catalogue would be demanded by
+ * `os i18n` and served by nobody.
  *
- * A hook that declares no `refusals` is untouched: its body's throws are
- * answered as they always were.
+ * A hook that declares no `refusals` is untouched: its throws are answered as
+ * they always were.
  */
+
+/** The source a save reads a hook's literal throws from, and where an issue about it points. */
+function refusalSourceOf(
+  hook: { body?: { language?: string; source?: unknown }; handler?: unknown },
+): { source: string; at: 'body.source' | 'handler' } | undefined {
+  if (hook.body?.language === 'js') {
+    return typeof hook.body.source === 'string' ? { source: hook.body.source, at: 'body.source' } : undefined;
+  }
+  if (typeof hook.handler === 'function') {
+    let source: string;
+    try {
+      source = Function.prototype.toString.call(hook.handler);
+    } catch {
+      return undefined;
+    }
+    return { source, at: 'handler' };
+  }
+  return undefined;
+}
 
 /**
  * The object-level check that refuses a catalogue nothing would answer, and a
- * code a hook's sandboxed body throws literally that its `refusals` does not
- * declare. See the block above.
+ * code (or a reason under a code) a hook's source throws literally that its
+ * `refusals` does not declare. See the block above.
  */
 function refuseUndeclaredLiteralRefusalCode(
-  hook: { refusals?: Record<string, unknown>; body?: { language?: string; source?: unknown } },
+  hook: {
+    refusals?: Record<string, { reasons?: Record<string, unknown> } | undefined>;
+    body?: { language?: string; source?: unknown };
+    handler?: unknown;
+  },
   ctx: z.RefinementCtx,
 ): void {
   if (!hook.refusals) return;
-  if (hook.body?.language !== 'js') {
+  const hasHandler = typeof hook.handler === 'function' || (typeof hook.handler === 'string' && hook.handler.length > 0);
+  const answered = hook.body === undefined ? hasHandler : hook.body.language === 'js';
+  if (!answered) {
     ctx.addIssue({ code: 'custom', path: ['refusals'], message: hookRefusalsWithoutSandboxedBody(hook.body?.language) });
     return;
   }
-  if (typeof hook.body.source !== 'string') return;
+  const read = refusalSourceOf(hook);
+  if (!read) return;
+  const path = read.at === 'body.source' ? ['body', 'source'] : ['handler'];
   const declared = Object.keys(hook.refusals);
-  for (const code of hookRefusalCodesThrownIn(hook.body.source)) {
+  for (const code of hookRefusalCodesThrownIn(read.source)) {
     if (Object.prototype.hasOwnProperty.call(hook.refusals, code)) continue;
+    ctx.addIssue({ code: 'custom', path, message: undeclaredHookRefusalCodeAtSave(code, declared, read.at) });
+  }
+  for (const { code, reason } of hookRefusalReasonsThrownIn(read.source)) {
+    if (!Object.prototype.hasOwnProperty.call(hook.refusals, code)) continue;
+    // A `reason` is read only under a code that declares `reasons`: under any
+    // other code it is not part of the refusal, exactly as before `reasons`
+    // existed, so a hook that already throws one is answered as it was.
+    const reasons = hook.refusals[code]?.reasons;
+    if (!reasons || Object.prototype.hasOwnProperty.call(reasons, reason)) continue;
     ctx.addIssue({
       code: 'custom',
-      path: ['body', 'source'],
-      message: undeclaredHookRefusalCodeAtSave(code, declared),
+      path,
+      message: undeclaredHookRefusalReasonAtSave(code, reason, Object.keys(reasons), read.at),
     });
   }
 }
 
 /**
+ * One sentence under a declared refusal code (#33214, ruling 6879477573,
+ * S1): the sentence the user reads when the hook throws the code with this
+ * reason. Translated through `hooks.<hook>.refusals.<CODE>.reasons.<REASON>.message`.
+ * Its `{{ }}` holes are judged against the entry's `params`, like the entry's
+ * own message. Not exported: it is published as part of {@link HookRefusalSchema}.
+ */
+const HookRefusalReasonSchema = lazySchema(() => strictObject(
+  {
+    surface: 'this hook refusal reason',
+    history: 'Closed from the day it was declared — a key this reason does not declare would be served nowhere.',
+    aliases: { text: 'message', description: 'message' },
+    guidance: {
+      code:
+        'A reason has no `code` of its own — it sits under the code it refines (`refusals.CODE.reasons.REASON`), and '
+        + 'the wire code is that code.',
+      status:
+        'A reason has no `status` of its own — the code it sits under decides the status. Declare a second code if '
+        + 'the status differs.',
+    },
+  },
+  {
+    message: z.string().trim().min(1).describe(
+      'The sentence the user reads when the hook throws this reason under its code — in the source locale, '
+      + 'translated through hooks.<hook>.refusals.<CODE>.reasons.<REASON>.message in the caller\'s locale; its {{ }} '
+      + 'holes follow the entry\'s message rule',
+    ),
+  },
+));
+
+/** The slot a refusal message's `{{ }}` holes are judged in, as a sentence names it. */
+const HOOK_REFUSAL_MESSAGE_SLOT = 'A hook refusal `message`';
+
+/**
+ * Why `message` is refused as a sentence of an entry declaring `params`, or
+ * `undefined`. No params: the plain-text rule (a hole is refused). Params: the
+ * closed-scope template rule over the declared names (a hole over a declared
+ * param only, a single-brace token prescribed its hole).
+ */
+function hookRefusalMessageRefusal(message: string, params: readonly string[] | undefined): string | undefined {
+  if (!params || params.length === 0) {
+    return HOOK_REFUSAL_MESSAGE_WITHOUT_HOLE.test(message) ? undefined : HOOK_REFUSAL_MESSAGE_HOLE_REFUSED;
+  }
+  return closedScopeTemplateRefusal(message, { slot: HOOK_REFUSAL_MESSAGE_SLOT, roots: params });
+}
+
+/**
  * One entry of a hook's refusal catalogue (#26170): the sentence the user
- * reads when the hook's body throws this entry's code, and the status the
- * refusal is answered with.
+ * reads when the hook throws this entry's code, and the status the refusal is
+ * answered with.
  *
- * The message is plain text, handed over verbatim in the source locale and
- * replaced whole by its translation, `hooks.<hook>.refusals.<CODE>.message` —
- * the validation-rule message's posture (`objects.<object>._validations.<rule>.message`):
- * an authored refusal has no parameter contract, so a `{{ }}` hole is refused at save.
+ * The message is handed over in the source locale and replaced whole by its
+ * translation, `hooks.<hook>.refusals.<CODE>.message` — the validation-rule
+ * message's posture (`objects.<object>._validations.<rule>.message`).
+ *
+ * [#33214, ruling 6879477573] Two optional parts, both declared and counted:
+ *
+ *  - `reasons` — further sentences under the SAME code, keyed by a snake_case
+ *    reason. The hook throws `{ code, reason }`; the runtime answers with the
+ *    reason's sentence, the code's status and the code on the wire, unchanged.
+ *    A reason the code does not declare is refused loudly, like a code. Under
+ *    a code that declares no `reasons`, a thrown `reason` is not read, as before.
+ *  - `params` — the names the entry's sentences may fill. The hook throws
+ *    `{ code, params: { NAME: value } }`, and each `{{ NAME }}` hole renders
+ *    through the template engine the flow `end` refusal renders with. A hole
+ *    over a name the entry does not declare is refused at parse; a hole
+ *    holding logic, an unknown formatter, an empty hole and a `currency`
+ *    formatter with no code (a hook refusal carries no default currency) are
+ *    refused where the sentence is compiled — `os validate`, `compile` and the
+ *    publish gate (`@objectstack/lint` `validate-hook-refusal-templates.ts`).
+ *    An entry that declares no `params` is plain text and every `{{ }}` hole
+ *    in it is refused, as before.
  */
 export const HookRefusalSchema = lazySchema(() => strictObject(
   {
     surface: 'this hook refusal',
     history: 'Closed from the day it was declared — a key this entry does not declare would be served nowhere.',
-    aliases: { text: 'message', reason: 'message', description: 'message', httpStatus: 'status', statusCode: 'status' },
+    aliases: {
+      text: 'message', reason: 'message', description: 'message', httpStatus: 'status', statusCode: 'status',
+      variants: 'reasons', messages: 'reasons', placeholders: 'params', parameters: 'params', variables: 'params',
+    },
     guidance: {
       code:
         '`code` is not a refusal key — the code is the entry\'s KEY in `refusals` '
@@ -305,16 +426,55 @@ export const HookRefusalSchema = lazySchema(() => strictObject(
     },
   },
   {
-    message: z.string().trim().min(1).regex(HOOK_REFUSAL_MESSAGE_WITHOUT_HOLE, HOOK_REFUSAL_MESSAGE_HOLE_REFUSED).describe(
-      'The sentence the user reads when the body throws this code — plain text in the source locale, translated '
-      + 'whole through hooks.<hook>.refusals.<CODE>.message in the caller\'s locale; a {{ }} hole is refused',
+    message: z.string().trim().min(1).describe(
+      'The sentence the user reads when the hook throws this code — in the source locale, translated whole through '
+      + 'hooks.<hook>.refusals.<CODE>.message in the caller\'s locale. With no params every {{ }} hole is refused; '
+      + 'with params a hole is a path over one of them with an optional known formatter, and a hole over another name, '
+      + 'a hole holding logic, an unknown formatter, an empty hole and a currency formatter with no code are refused',
     ),
     status: z.number().int().min(400).max(499).optional().describe(
       'HTTP status the refusal is answered with (4xx; a refusal is never a fault). Absent: 400. A status the '
       + 'body itself sets on the throw is not read — the catalogue decides',
     ),
+    reasons: z.record(
+      z.string().regex(HOOK_REFUSAL_REASON_PATTERN, {
+        message: 'A refusal reason is snake_case (e.g. plan_locked) — the reason the hook throws beside the code',
+      }),
+      HookRefusalReasonSchema,
+    ).optional().describe(
+      'Further sentences under this same code, keyed by the snake_case reason the hook throws beside the code '
+      + '({ code, reason }): { message }. The wire code and status stay this entry\'s. A reason not declared here '
+      + 'is refused loudly. Absent: the code has the one sentence, and a thrown reason is not read',
+    ),
+    params: z.array(
+      z.string().regex(HOOK_REFUSAL_PARAM_PATTERN, {
+        message: 'A refusal param is an identifier (e.g. state) — the root a {{ }} hole names',
+      }),
+    ).optional().describe(
+      'The names this entry\'s sentences may fill: a {{ NAME }} or {{ NAME | formatter }} hole renders the value '
+      + 'the hook throws in `params` ({ code, params: { NAME: value } }). A hole over any other name, logic, an '
+      + 'unknown formatter, an empty hole and a currency formatter with no code are refused. Absent: the sentences '
+      + 'are plain text and a {{ }} hole is refused',
+    ),
   },
-));
+).superRefine((entry, ctx) => {
+  const params = entry.params;
+  if (params) {
+    const seen = new Set<string>();
+    params.forEach((name, i) => {
+      if (seen.has(name)) {
+        ctx.addIssue({ code: 'custom', path: ['params', i], message: `\`params\` names '${name}' twice — declare each once.` });
+      }
+      seen.add(name);
+    });
+  }
+  const own = hookRefusalMessageRefusal(entry.message, params);
+  if (own !== undefined) ctx.addIssue({ code: 'custom', path: ['message'], message: own });
+  for (const [reason, sentence] of Object.entries(entry.reasons ?? {})) {
+    const refusal = hookRefusalMessageRefusal(sentence.message, params);
+    if (refusal !== undefined) ctx.addIssue({ code: 'custom', path: ['reasons', reason, 'message'], message: refusal });
+  }
+}));
 
 export type HookRefusal = z.input<typeof HookRefusalSchema>;
 
@@ -333,7 +493,11 @@ export type HookRefusal = z.input<typeof HookRefusalSchema>;
  * write happened". They are dispatched before the enclosing transaction (if
  * there is one) commits, so a later refusal can roll the row back after the
  * hook has already run. Ruled on #7477 (2026-08-11) as the declared semantics,
- * not an implementation detail to be re-timed later.
+ * not an implementation detail to be re-timed later. A blocking hook RUNS at
+ * that dispatch; an `async: true` hook is dispatched there too but runs only
+ * once the unit commits, and never when it rolls back (#33760, see `async`
+ * below) — so for an async hook, what this section says about a hook that
+ * "has already run" does not apply.
  *
  * Four ordinary ways a write ends up inside such a unit:
  *   - the write door itself, when the object has a blocking (not `async`)
@@ -350,15 +514,20 @@ export type HookRefusal = z.input<typeof HookRefusalSchema>;
  *     around the write itself.
  *
  * What that means for a handler:
- *   - **Effects through the same engine are safe.** `ctx.api` / `ctx.ql` writes
- *     join the same transaction and roll back with everything else — which is
- *     exactly what makes an in-engine audit hook correct.
+ *   - **Effects through the same engine are safe — in a blocking hook.** A
+ *     blocking (not `async`) hook's `ctx.api` / `ctx.ql` writes join the same
+ *     transaction and roll back with everything else — which is exactly what
+ *     makes an in-engine audit hook correct. An `async: true` hook is the
+ *     exception: it runs after the unit commits and not at all if it rolls
+ *     back (see `async` below), so its writes are never part of the unit.
  *   - **Effects OUTSIDE the engine are the hook's own responsibility to make
  *     rollback-tolerant** — webhooks, notifications, external index updates,
  *     file deletion, email. On a rollback the row survives and the
  *     announcement has already gone out. Make such an effect idempotent and
  *     reconcilable, or enqueue it for a worker that re-reads the row before
- *     acting rather than trusting the event alone.
+ *     acting rather than trusting the event alone. This is a blocking hook's
+ *     burden: an `async: true` hook runs only after the commit, so it never
+ *     announces a write that was rolled back.
  *
  * The `before*` events carry no such caveat: they run before the write is
  * issued, and throwing from one refuses the operation.
@@ -559,6 +728,18 @@ export const HookSchema = lazySchema(() => strictObject(
    * If true, the hook runs in the background and does not block the transaction.
    * Only applicable for 'after*' events.
    * Default: false (Blocking)
+   *
+   * Fired inside a unit of work (see {@link HookEvent}), an async hook starts
+   * once the outermost unit commits, and is dropped without running when that
+   * unit rolls back; its `ctx.api` reads then see the committed write, and its
+   * writes run outside the unit, on their own connection. Outside any unit it
+   * starts at once, after the write. Nothing waits for it, and its errors
+   * never reach the caller.
+   *
+   * That waiting is for a WRITE event's hook (`afterInsert` / `afterUpdate` /
+   * `afterDelete`). A rollback does not undo a read, so an async `afterFind`
+   * hook starts when the read is dispatched, outside the unit, whatever the
+   * unit it was read in does next.
    */
   async: z.boolean().default(false).describe('Run specifically as fire-and-forget'),
 
@@ -640,26 +821,38 @@ export const HookSchema = lazySchema(() => strictObject(
 
   /**
    * The hook's refusal catalogue (#26170, maintainer ruling 6431311681
-   * letter A): every refusal its body may throw, keyed by the code it throws.
+   * letter A): every refusal its code may throw, keyed by the code it throws.
    *
    *   refusals: {
    *     CLEAN_VERSION_REQUIRED: { message: 'A current clean version is required before signing.', status: 422 },
+   *     VALIDATION_FAILED: {
+   *       message: 'This plan cannot be submitted.',
+   *       params: ['state'],
+   *       reasons: { plan_locked: { message: 'The plan is {{ state }} and can no longer change.' } },
+   *     },
    *   }
    *
-   * The body refuses by code only — it throws an error carrying a declared
-   * `code`, and the runtime answers with that entry: its `message`, translated
-   * through `hooks.<hook>.refusals.<CODE>.message` in the caller's locale with
-   * the declared message as the fallback, marked as the end user's sentence,
-   * and its `status`. A code the catalogue does not declare, or a throw with no
-   * code, is refused loudly: at save where the body names it literally,
-   * otherwise when it runs, as a fault naming the hook and the code. An error
-   * a host call raised and the body let through unchanged (a `ctx.api` write
-   * refused by the engine, a nested hook's refusal) passes through as before,
-   * and so does a crash.
+   * The hook refuses by code only — it throws an error carrying a declared
+   * `code` (and, #33214, optionally a declared `reason` and the `params` its
+   * sentence names), and the runtime answers with that entry: its `message`
+   * (or the reason's), translated through `hooks.<hook>.refusals.<CODE>.message`
+   * (`….<CODE>.reasons.<REASON>.message`) in the caller's locale with the
+   * declared sentence as the fallback, its holes filled from `params`, marked
+   * as the end user's sentence, and its `status`. A code the catalogue does
+   * not declare, a reason a code with `reasons` does not declare, or a throw
+   * with no code, is refused loudly: at
+   * save where the hook's source names it literally, otherwise when it runs,
+   * as a fault naming the hook and the code. An error a host call raised and
+   * the hook let through unchanged (a `ctx.api` write refused by the engine, a
+   * nested hook's refusal) passes through as before, and so does a crash.
    *
    * Keyed by hook name, not by object: one hook bound to several objects, or
-   * to `'*'`, owns one catalogue and one translation per code. Read by the
-   * sandboxed `body` runner only, so it is refused on a hook with no `js` body.
+   * to `'*'`, owns one catalogue and one translation per code. Answered on
+   * every path the hook runs on (#33214, ruling 6879477573): a sandboxed `js`
+   * body, and an in-process `handler` — inline, or the string reference a
+   * build leaves when it cannot lower one — through one in-process seam with
+   * the same wire. Refused on a hook whose code cannot throw a code: an
+   * `expression` body, or neither a body nor a handler.
    * Absent: the hook's throws are answered as they always were.
    */
   refusals: z.record(
@@ -668,10 +861,12 @@ export const HookSchema = lazySchema(() => strictObject(
     }),
     HookRefusalSchema,
   ).optional().describe(
-    'Refusal catalogue keyed by the SCREAMING_SNAKE code the body throws: { message, status? }. The body refuses '
-    + 'by code only; the runtime answers with the declared message (translated through '
-    + 'hooks.<hook>.refusals.<CODE>.message in the caller\'s locale) and status. A code not declared here is refused '
-    + 'loudly — at save when the body throws it literally, otherwise at run time',
+    'Refusal catalogue keyed by the SCREAMING_SNAKE code the hook throws: { message, status?, reasons?, params? }. '
+    + 'The hook (a js body or a handler) refuses by code only, optionally with a declared reason and params; the '
+    + 'runtime answers with the declared message (translated through hooks.<hook>.refusals.<CODE>.message, or '
+    + '….<CODE>.reasons.<REASON>.message, in the caller\'s locale, holes filled from params) and status. A code not '
+    + 'declared here, or a reason a code with reasons does not declare, is refused loudly — at save when the hook throws '
+    + 'it literally, otherwise at run time; under a code with no reasons a thrown reason is not read',
   ),
 
   /**
@@ -1461,7 +1656,7 @@ export const HookContextSchema = lazySchema(() => z.object({
    * or the audit writer — can tell "the run / the person this write belongs
    * to" from "an unrelated caller".
    *
-   * Four marks, none authorizing, for four different questions:
+   * Five marks, none authorizing, for five different questions:
    *  - `flowRunId` — WHAT produced the write (a machine origin, no person);
    *  - `attributedUserId` — WHO is CREDITED for a write the system authorized
    *    (a person, but never the subject the write was authorized as);
@@ -1469,6 +1664,16 @@ export const HookContextSchema = lazySchema(() => z.object({
    *    human in `session.userId` (ADR-0090 D10 rule 4's `performed_by`; the
    *    `on_behalf_of` half is that same `session.userId`, so it is not carried
    *    a second time here);
+   *  - `performedByAgentId`, with `performedByConversationId` and
+   *    `performedByConfirmationId` — WHICH IN-PRODUCT AI performed a write for
+   *    the signed-in person in `session.userId`, in which conversation, and
+   *    under which confirmation. Rule 4's attribution from its second
+   *    producer, the server-constructed in-product AI path, whose write runs as
+   *    that person (owner ruling on objectstack-ai/cloud#3826, 「3826 照建议
+   *    （征询版）」, carried by #33694 and #33786); each key is copied from its
+   *    `ExecutionContext.performedBy` sibling, as `performedByClientId` is from
+   *    `clientId`, and carried for the audit writer, which records them under
+   *    #33694 (at this revision it reads `performedByClientId` only);
    *  - `impersonatedBy` — WHICH ADMINISTRATOR made a write from an
    *    impersonation session, authorized as the impersonated user in
    *    `session.userId`.
@@ -1486,6 +1691,9 @@ export const HookContextSchema = lazySchema(() => z.object({
     flowRunId: z.string().optional().describe('Id of the automation flow run performing this write, when it originates from a flow data node. Lets a hook recognize the run that OWNS state that run itself opened — the approvals record lock exempts the run holding the pending request.'),
     attributedUserId: z.string().optional().describe('The real human credited for a write whose authorization subject was the SYSTEM — e.g. the admin whose better-auth `update-member-role` call the identity adapter executes as `isSystem`. ATTRIBUTION ONLY: the audit writer records it as `sys_audit_log.user_id`; no security middleware reads it, and it never becomes the subject the write is authorized as.'),
     performedByClientId: z.string().optional().describe('[ADR-0090 D10 rule 4] The AGENT that performed this write — the OAuth client (`azp`, a registered sys_oauth_application id) the access token was issued to, when an AI client acted on behalf of the human in `session.userId`. Copied from `ExecutionContext.performedBy.clientId`, which only the /mcp OAuth door sets. ATTRIBUTION ONLY, exactly like `attributedUserId`: the audit writer records it in `sys_audit_log.metadata` as `performed_by` beside `on_behalf_of`; no security middleware reads it and it never becomes the subject the write is authorized as. Absent on every non-delegated write, so a hook tells the two apart by the key being there rather than by guesswork.'),
+    performedByAgentId: z.string().optional().describe('The in-product AI agent that performed this write for the signed-in person in `session.userId`, whose write it runs as: the agent the chat runs as. Copied from `ExecutionContext.performedBy.agentId`, which only the server-constructed in-product AI path sets, after resolving it as the agent it actually ran. ATTRIBUTION ONLY, exactly like `performedByClientId`: carried for the audit writer, which does not record it yet; no security middleware reads it and it never becomes the subject the write is authorized as. Absent on every write the person made themselves.'),
+    performedByConversationId: z.string().optional().describe('The AI conversation an in-product AI write was performed in. Copied from `ExecutionContext.performedBy.conversationId`, set beside `performedByAgentId`. ATTRIBUTION ONLY: no security middleware reads it.'),
+    performedByConfirmationId: z.string().optional().describe('The confirmation the person gave before an AI-performed write ran: the id of the pending item their approval decided. Copied from `ExecutionContext.performedBy.confirmationId`; absent when the write needed no confirmation. ATTRIBUTION ONLY: no security middleware reads it, and it is never the authorization for the write, which runs as the person with every gate re-checked.'),
     impersonatedBy: z.string().optional().describe('The ADMINISTRATOR (a sys_user id) who made this write from an impersonation session, while `session.userId` is the impersonated user the write is authorized as. Copied from `ExecutionContext.impersonatedBy`, which the shared request-identity resolution sets from the session read. ATTRIBUTION ONLY, exactly like `performedByClientId`: the audit writer records it as `sys_audit_log.metadata.impersonated_by` and on the sys_activity row; no security middleware reads it and it never becomes the subject the write is authorized as. Absent on every write the user made themselves.'),
   }).optional().describe('Server-stamped write provenance (never client-supplied, never an authorization input)'),
 

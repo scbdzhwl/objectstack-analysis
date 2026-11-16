@@ -21,7 +21,7 @@
  * route on one path but not the other).
  */
 
-import { inProcessSessionReadInput } from '@objectstack/types';
+import { inProcessSessionReadInput, INTERNAL_ERROR_MESSAGE } from '@objectstack/types';
 import { readJsonRequestBody } from './request-json-body.js';
 
 /**
@@ -47,9 +47,27 @@ export interface SetInitialPasswordResult {
  *                  cookie that better-auth's session middleware reads, and its
  *                  body carries `{ newPassword }`.
  */
+export interface SetInitialPasswordOptions {
+  /**
+   * [#33181] Asked once the body has been read and holds a `newPassword`, and
+   * before anything is written: an answer refuses the request with it,
+   * `undefined` lets it through. A host twin that passes nothing is
+   * unchanged.
+   */
+  beforeWrite?(): Promise<SetInitialPasswordResult | undefined>;
+  /**
+   * The mount's logger. A failure that carries no vendor code is answered with
+   * the generic internal-error message, and the error itself is handed here,
+   * once, at error level. A host twin that passes none answers the same way
+   * and logs nothing.
+   */
+  logger?: { error(message: string, error?: Error): void };
+}
+
 export async function runSetInitialPassword(
   authApi: SetPasswordCapableApi,
   request: Request,
+  options: SetInitialPasswordOptions = {},
 ): Promise<SetInitialPasswordResult> {
   // [#24032] A declared-JSON body that does not parse is refused before
   // `setPassword` is reached: it was read as `{}`, which answered
@@ -69,6 +87,9 @@ export async function runSetInitialPassword(
     };
   }
 
+  const refused = await options.beforeWrite?.();
+  if (refused) return refused;
+
   try {
     // better-auth's session middleware reads the session from `headers`;
     // length checks + the "already set" guard happen inside setPassword.
@@ -81,7 +102,7 @@ export async function runSetInitialPassword(
     await authApi.setPassword({ body: { newPassword }, ...inProcessSessionReadInput(request.headers) });
     return { status: 200, body: { success: true } };
   } catch (error) {
-    return mapSetPasswordError(error);
+    return mapSetPasswordError(error, options.logger);
   }
 }
 
@@ -91,8 +112,18 @@ export async function runSetInitialPassword(
  * preserve the status code and code string for parity with the change/reset
  * flows. `PASSWORD_ALREADY_SET` is normalised to 409 so callers can tell
  * "already has a password → use change-password" apart from validation errors.
+ *
+ * A refusal keeps its own answer: one the vendor classifies (it carries a
+ * body code), and one whose status says it is addressed to the caller (4xx).
+ * Anything else is an unclassified internal failure: it is answered
+ * `INTERNAL_ERROR` in the generic words every route catch in `auth-plugin.ts`
+ * uses, and the error is logged once — the thrown error's own text never
+ * reaches the caller. The status is read the same way in every case.
  */
-function mapSetPasswordError(error: unknown): SetInitialPasswordResult {
+function mapSetPasswordError(
+  error: unknown,
+  logger: SetInitialPasswordOptions['logger'],
+): SetInitialPasswordResult {
   const e = error as {
     statusCode?: number;
     status?: number | string;
@@ -100,10 +131,16 @@ function mapSetPasswordError(error: unknown): SetInitialPasswordResult {
     message?: string;
   } | null;
 
-  const code = e?.body?.code ?? 'INTERNAL_ERROR';
-  const message = e?.body?.message ?? e?.message ?? 'set-initial-password failed';
+  const vendorCode = e?.body?.code ?? undefined;
   const rawStatus =
     typeof e?.statusCode === 'number' ? e.statusCode : typeof e?.status === 'number' ? e.status : 500;
+  if (vendorCode === undefined && !(rawStatus >= 400 && rawStatus <= 499)) {
+    logger?.error('[AuthPlugin] set-initial-password failed', error instanceof Error ? error : new Error(String(error)));
+    return { status: rawStatus, body: { success: false, error: { code: 'INTERNAL_ERROR', message: INTERNAL_ERROR_MESSAGE } } };
+  }
+
+  const code = vendorCode ?? 'INTERNAL_ERROR';
+  const message = e?.body?.message ?? e?.message ?? 'set-initial-password failed';
   const status = code === 'PASSWORD_ALREADY_SET' ? 409 : rawStatus;
 
   return { status, body: { success: false, error: { code, message } } };

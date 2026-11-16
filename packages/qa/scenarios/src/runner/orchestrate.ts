@@ -1,16 +1,19 @@
 // Copyright (c) 2026 ObjectStack. Licensed under the Apache-2.0 license.
 
 /**
- * One card, end to end, in up to two modes:
+ * One card, end to end, in up to three modes:
  *
  *   scratch   scaffold → the agent builds from the card prompt → `os validate`,
  *             `os build`, `os verify` (opt-in proofs from the tags) → score the
  *             artifact → boot, seed, one user + key per persona → the Run half
- *             (every question as every persona it names, every operation as
- *             its persona, each over the app's own MCP, and a probed
+ *             (every question as every persona it names, `askRepeats` times
+ *             each, every operation once as its persona, each over the app's
+ *             own MCP, and a probed
  *             operation's declared write — the validation operation's and
  *             each permission overstep's — re-sent by the runner itself as
- *             that persona, `observeProbe`) → the iterate change →
+ *             that persona, `observeProbe`; an `applied` operation's too
+ *             when the agent's own write was denied 403, `probesBuildDenial`)
+ *             → the iterate change →
  *             rebuild + re-score Build, and (unless disabled) re-run the Run half.
  *             A build whose authoring turn did not finish (killed by the
  *             runner's timeout, no result, an error result) is NOT MEASURED,
@@ -20,6 +23,11 @@
  *             change to the installed copy → score it → seed → the Run half.
  *             A refused install (`UNCOPYABLE`, …) is a finding, recorded and
  *             never worked around.
+ *   ask       the same install of the same verified build as `template`, into
+ *             a blank host of its own → seed → the Run half, and nothing else:
+ *             no authoring turn, no score, no iterate. Two ask models run this
+ *             way on one build are graded on the same app, so a difference in
+ *             their answers is theirs, not the build's.
  *
  * Names: the app is always in the card's own namespace, `demo` + its code
  * (`democrm`). Scratch mode scaffolds the project under that name; template
@@ -32,12 +40,18 @@
  */
 
 import { applyExpectDelta, readableNumbers, truthsOver, type LoadedScenario } from '../loader.js';
-import { isProbedOperation, PERSON_USER_FIELD, scenarioNamespace, type CardTitle } from '../schema.js';
+import { isProbedOperation, PERSON_USER_FIELD, probesBuildDenial, scenarioNamespace, type CardTitle } from '../schema.js';
 import {
   gradeCardAnswer,
+  gradeCardInjection,
+  buildDeniesWrite,
   gradeCardOperation,
+  INJECTION_AS_DATA_CHECK,
+  isWriteDenial,
   readArtifactFacts,
   scoreCardArtifact,
+  type CardTurn,
+  type CheckResult,
   type OperationGrade,
   type OperationObservation,
   type PersonaRunGrade,
@@ -45,11 +59,25 @@ import {
   type ScenarioArtifactScore,
 } from '../score/index.js';
 import type { AppHarness, PersonaAccount } from './app.js';
-import { servedAsRequested, type AgentDriver, type StepRef } from './driver.js';
+import { ReplayNotFaithfulError, servedAsRequested, type AgentDriver, type AskTask, type StepRef } from './driver.js';
 import { citationLabels, namespaceOfArtifact, namespacedScenario, permissionSetName, templateHostName } from './namespace.js';
-import { agentSetOf, clockDates, observeOperation, observeProbe, probeCall, touchedRowId, type Row } from './observe.js';
+import { agentSetOf, clockDates, observeOperation, observeProbe, probeCall, touchedRowId, writeCallsOn, type Row } from './observe.js';
 import type { CommandResult } from './project.js';
-import { buildPrompt, iteratePrompt, operationPrompt, personaHandles, personaRecords, questionPrompt, rowOwner, templateIteratePrompt, userHandleFields, verifyArgs } from './prompts.js';
+import {
+  buildPrompt,
+  iteratePrompt,
+  operationPrompt,
+  personaHandles,
+  personaRecords,
+  promptLanguageRefusal,
+  statedPromptChoice,
+  questionPrompt,
+  rowOwner,
+  templateIteratePrompt,
+  userHandleFields,
+  verifyArgs,
+  type PromptChoice,
+} from './prompts.js';
 import { lookupKey, requiredLookups, seedPlan, type SeedLookup } from './seed.js';
 import type { ParsedTurn } from './transcript.js';
 
@@ -77,13 +105,34 @@ export interface ProjectOps {
 }
 
 export interface RunOptions {
-  modes: ReadonlyArray<'scratch' | 'template'>;
+  modes: ReadonlyArray<'scratch' | 'template' | 'ask'>;
   /** Re-run the Run half after the iterate (scratch mode). Default true. */
   iterateRun?: boolean;
-  /** A verified build to install in template mode (e.g. the gallery's last passing export). */
+  /**
+   * A verified build to install in template and ask modes (e.g. the gallery's
+   * last passing export); without it they install this run's from-scratch
+   * build when it passed. Ask mode needs one or the other ({@link askModeRefusal}).
+   */
   templateArtifact?: unknown;
   /** The dev admin the runner signs in as (`os dev --fresh` seeds it). */
   admin: { email: string; password: string };
+  /**
+   * How many times each (question, persona) turn is asked on the same booted
+   * app (`--ask-repeats`), each ask a fresh agent session; default 1.
+   * Operations are never repeated: they write, and a second run would act on
+   * the rows the first one changed.
+   */
+  askRepeats?: number;
+  /**
+   * The prompt choice (`--lang`, `--prompt`, {@link PromptChoice}), sent in
+   * every mode: the build turn, the iterate turn (scratch and template), and
+   * every question and operation turn, each ask of a repeated one included.
+   * Absent ⇒ today's prompts, byte for byte. A card that lacks a text the
+   * run would render in the chosen language is refused before any mode
+   * runs ({@link promptLanguageRefusal}); the CLI skips it before the first
+   * card instead.
+   */
+  promptChoice?: PromptChoice;
 }
 
 // ── The record of one card ──────────────────────────────────────────────────
@@ -102,8 +151,24 @@ export interface TurnSummary {
   requestedModel?: string;
   /** The served model is not the requested one ({@link servedAsRequested}); only when both are known. */
   modelMismatch?: true;
-  /** Wall-clock time of the CLI process, when the driver ran one (`meta.process`). */
+  /**
+   * The effort level the driver asked for (`--effort` / `--author-effort` /
+   * `--ask-effort`, `meta.process`); absent ⇒ the CLI's default effort, or a
+   * turn recorded before the runner kept it. No stream reports the effort a
+   * turn was served, so there is no served effort to compare it with.
+   */
+  requestedEffort?: string;
+  /**
+   * Wall-clock time of the turn's process, spawn to exit, by the runner's own
+   * clock (`meta.process`): every live driver runs one (`claude`, `codex`,
+   * `external:`). Absent ⇒ no process was recorded (a replay of a recording
+   * made before the runner kept it): the turn was not timed, never a zero.
+   */
   elapsedMs?: number;
+  /** The turn's duration as the CLI stated it (`meta.reportedDurationMs`, the `claude` result line's `duration_ms`); absent ⇒ none stated. */
+  reportedDurationMs?: number;
+  /** The part of it the CLI spent on the model API (`meta.reportedApiDurationMs`, `duration_api_ms`); absent ⇒ none stated. */
+  reportedApiDurationMs?: number;
   /**
    * The turn's cost in US dollars as its driver reported it (`meta.reportedCostUsd`:
    * the `claude` CLI's estimate, or an external command's report). Absent ⇒
@@ -140,7 +205,17 @@ export interface BuildHalf {
 export interface QuestionResult {
   question: string;
   persona: string | null;
-  /** Why this turn was not asked: its expected answer changes without the rows the seed could not load ({@link seedDependence}). Not measured, never a fail. */
+  /**
+   * Which ask of the turn this is, counted from 1, when the run asked each
+   * question turn more than once ({@link RunOptions.askRepeats}); every ask
+   * keeps its own grade. Absent when the run asked once.
+   */
+  repeat?: number;
+  /**
+   * Why this turn measures nothing: it was not asked, because its expected
+   * answer changes without the rows the seed could not load ({@link seedDependence});
+   * or it was replayed and the replay was not faithful (`ReplayNotFaithfulError`). Never a fail.
+   */
   notMeasured?: string;
   grade?: PersonaRunGrade;
   turn?: TurnSummary;
@@ -150,8 +225,21 @@ export interface QuestionResult {
 export interface OperationResult {
   operation: string;
   persona: string;
-  /** Why this operation was not run: it acts on a row the seed could not load ({@link seedDependence}). Not measured, never a fail. */
+  /**
+   * Why this operation is not measured: it was not run, because it acts on a
+   * row the seed could not load ({@link seedDependence}); or it ran and its
+   * grade measured nothing (`OperationGrade.notMeasured`: the build denies the
+   * persona the write the card gives it, `buildDeniesWrite`); or it was
+   * replayed and the app did not answer its re-sent writes as it answered the
+   * recorded run (`ReplayNotFaithfulError`). Never a fail.
+   */
   notMeasured?: string;
+  /**
+   * The write the build denies the acting persona, when the grade charged a
+   * check to it (`buildDeniesWrite`): the persona, the operation's object as
+   * the app names it, and the verb. The scorecard lists it as a Build finding.
+   */
+  buildDenial?: { persona: string; object: string; verb: 'create' | 'update' };
   observation?: OperationObservation;
   grade?: OperationGrade;
   turn?: TurnSummary;
@@ -182,6 +270,14 @@ export interface RunHalf {
   };
   questions: QuestionResult[];
   operations: OperationResult[];
+  /**
+   * The card's guardrails graded over the half's turns as a whole: today
+   * `guardrail:injection_as_data` (`gradeCardInjection`), passing when no turn
+   * that read the planted cell took the act the card forbids; not measured,
+   * never a pass, when no turn read it or the grading threw (which never sets
+   * {@link RunHalf.error}). Absent on a record from before it was graded.
+   */
+  guardrails?: CheckResult[];
   error?: string;
 }
 
@@ -194,10 +290,17 @@ export interface ChangeSize {
 }
 
 export interface ModeRun {
-  mode: 'scratch' | 'template';
+  mode: 'scratch' | 'template' | 'ask';
+  /** Absent in template and ask modes, which build nothing first. */
   build?: BuildHalf;
   run?: RunHalf;
+  /** Absent in ask mode, which authors nothing. */
   iterate?: { build: BuildHalf; run?: RunHalf; changeSize?: ChangeSize };
+  /**
+   * The verified build template and ask modes installed: where it came from
+   * (`supplied template`, or `this run’s from-scratch build`) and how the
+   * unmanaged install door answered.
+   */
   template?: { source: string; install: { ok: boolean; status: number; code?: string; message?: string }; installModesSupplied: boolean };
   skipped?: string;
   findings: string[];
@@ -209,6 +312,18 @@ export interface CardRun {
   title: CardTitle;
   capabilities: string[];
   counts: { questions: number; questionTurns: number; operations: number; personas: number };
+  /**
+   * How many times each question turn was asked ({@link RunOptions.askRepeats}),
+   * when more than once; absent ⇒ once. Outside `counts`, whose shape a record
+   * reader may hold exact.
+   */
+  askRepeats?: number;
+  /**
+   * The prompt choice the run was given ({@link RunOptions.promptChoice}),
+   * when a flag set one; absent ⇒ the default prompts. Outside `counts`, like
+   * `askRepeats`, so a default record keeps its bytes.
+   */
+  promptChoice?: PromptChoice;
   modes: ModeRun[];
 }
 
@@ -227,8 +342,11 @@ const summarize = (t: ParsedTurn): TurnSummary => {
     ...(t.meta.model ? { model: t.meta.model } : {}),
     ...(p?.requestedModel ? { requestedModel: p.requestedModel } : {}),
     ...(p?.requestedModel && t.meta.model && !servedAsRequested(p.requestedModel, t.meta.model) ? { modelMismatch: true as const } : {}),
+    ...(p?.requestedEffort ? { requestedEffort: p.requestedEffort } : {}),
     toolCalls: t.toolCalls.length,
     ...(p ? { elapsedMs: p.elapsedMs } : {}),
+    ...(t.meta.reportedDurationMs !== undefined ? { reportedDurationMs: t.meta.reportedDurationMs } : {}),
+    ...(t.meta.reportedApiDurationMs !== undefined ? { reportedApiDurationMs: t.meta.reportedApiDurationMs } : {}),
     ...(t.meta.reportedCostUsd !== undefined ? { reportedCostUsd: t.meta.reportedCostUsd } : {}),
     ...(t.meta.inputTokens !== undefined ? { inputTokens: t.meta.inputTokens } : {}),
     ...(t.meta.outputTokens !== undefined ? { outputTokens: t.meta.outputTokens } : {}),
@@ -245,6 +363,14 @@ const summarize = (t: ParsedTurn): TurnSummary => {
 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 2000);
+
+/** Why a replayed turn measures nothing ({@link ReplayNotFaithfulError}): what its read-back would grade is the replay's, not the agent's. */
+const replayNotFaithful = (e: ReplayNotFaithfulError): string => `the replay is not faithful: ${e.reason}`.slice(0, 2000);
+
+/** Refuse an ask count that is not a whole number above 0 ({@link RunOptions.askRepeats}). */
+function assertAskRepeats(n: number): void {
+  if (!Number.isInteger(n) || n < 1) throw new RangeError(`askRepeats takes a whole number of asks above 0, not ${String(n)}`);
+}
 
 /** `60 min`, `0.5 min`: a timeout as the not-measured reason states it. */
 export const minutesText = (ms: number): string => `${Number((ms / 60_000).toFixed(2))} min`;
@@ -493,6 +619,30 @@ export function buildLockOf(built: unknown, card: Card, op: Operation): string |
   return `${setName} locks ${locked.join(', ')} and the build declares the action${actions.length > 1 ? 's' : ''} ${actions.join(', ')} on ${op.object}`;
 }
 
+/**
+ * The build's confirmation gate per action on an operation's object, read from
+ * the built artifact: each action name declared there, `true` when it carries
+ * `ai.requiresConfirmation: true`. `undefined` when the artifact cannot be
+ * read. The grader's temporary rule reads it (`AGENT_CONFIRMATION_MEETS_PENDING`,
+ * until objectstack-ai/cloud#3826 item 6).
+ */
+export function actionGatesOf(built: unknown, op: Operation): Record<string, boolean> | undefined {
+  if (built === undefined) return undefined;
+  let facts: ReturnType<typeof readArtifactFacts>;
+  try {
+    facts = readArtifactFacts(built);
+  } catch {
+    return undefined;
+  }
+  const gates: Record<string, boolean> = {};
+  for (const { object, action } of facts.actions) {
+    if (object !== op.object) continue;
+    const ai = typeof action.ai === 'object' && action.ai !== null ? (action.ai as { requiresConfirmation?: unknown }) : undefined;
+    gates[String(action.name)] = ai?.requiresConfirmation === true;
+  }
+  return gates;
+}
+
 function personaOfUser(userId: string | null, accounts: readonly PersonaAccount[], adminId: string): string | null {
   if (userId === null) return null;
   const hit = accounts.find((a) => a.userId === userId);
@@ -664,6 +814,16 @@ export async function seedApp(
  * Seed, personas, every question and every operation, against one booted app.
  * `built` is the artifact the app serves, whose required lookups decide which
  * side of a reference cycle the seed's second pass sets ({@link seedApp}).
+ *
+ * Each (question, persona) turn is asked `askRepeats` times in a row
+ * ({@link RunOptions.askRepeats}), every ask a fresh driver call under its own
+ * replay key ({@link StepRef.repeat}) and graded on its own; the first ask's
+ * key is the one a single ask has. Every question is asked before any
+ * operation writes, so each ask reads the same rows. A turn the seed takes out
+ * ({@link seedDependence}) is not measured at every ask alike. Operations run
+ * once. The guardrails are graded over every turn that ran, each ask included.
+ * Every question and operation turn is sent in the prompt choice `choice`
+ * ({@link RunOptions.promptChoice}); absent ⇒ the default prompts.
  */
 export async function runHalf(
   scenario: LoadedScenario,
@@ -672,10 +832,15 @@ export async function runHalf(
   ref: Pick<StepRef, 'card' | 'mode' | 'phase'>,
   objectLabels?: Record<string, string[]>,
   built?: unknown,
+  askRepeats = 1,
+  choice?: PromptChoice,
 ): Promise<RunHalf> {
+  assertAskRepeats(askRepeats);
   const { card } = scenario;
   const half: RunHalf = { personas: [], seed: { inserted: 0, refused: [] }, questions: [], operations: [] };
   const accounts: PersonaAccount[] = [];
+  // Every turn the agent answered, for the guardrails graded over the half (a replay that was not faithful measures nothing).
+  const turns: CardTurn[] = [];
   try {
     await app.signInAdmin();
     for (const p of card.run.personas) {
@@ -689,31 +854,43 @@ export async function runHalf(
     await seedApp(scenario, app, accounts, half.seed, requiredLookups(built)); // tallied in place, so a throw keeps the partial seed
 
     const keyOf = (persona: string | null) => (persona === null ? adminKey : accounts.find((a) => a.persona === persona)!.apiKey);
+    // The door a turn is given: the app's MCP endpoint as the persona, and the
+    // runner's own call through it (a replay re-sends the recorded writes there).
+    const doorOf = (persona: string | null): Pick<AskTask, 'mcp' | 'callTool'> => {
+      const apiKey = keyOf(persona);
+      return { mcp: { url: app.mcpUrl, apiKey }, callTool: (tool, args) => app.callTool(apiKey, tool, args) };
+    };
     // A refused seed row makes what reads it not measured — never a fail of the app's answer.
     const dependence = seedDependence(scenario, half.seed.refused);
 
     for (const q of card.run.questions) {
       for (const persona of [null, ...(q.personas ?? [])]) {
         if (persona === null && q.personas?.length) continue; // a persona-scoped question is asked as its personas
-        const res: QuestionResult = { question: q.id, persona };
         const notMeasured = dependence.question(q, persona);
-        if (notMeasured) {
-          half.questions.push({ ...res, notMeasured });
-          continue;
+        for (let repeat = 1; repeat <= askRepeats; repeat++) {
+          const res: QuestionResult = { question: q.id, persona, ...(askRepeats > 1 ? { repeat } : {}) };
+          if (notMeasured) {
+            half.questions.push({ ...res, notMeasured });
+            continue;
+          }
+          try {
+            const turn = await driver.ask({ ...ref, step: q.id, ...(persona ? { persona } : {}), ...(repeat > 1 ? { repeat } : {}), prompt: questionPrompt(scenario, q.id, choice), ...doorOf(persona) });
+            turns.push({ step: q.id, ...(persona ? { persona } : {}), turn });
+            res.turn = summarize(turn);
+            res.grade = gradeCardAnswer(scenario, {
+              question: q.id,
+              ...(persona ? { persona, hidden: { values: hiddenValues(scenario, persona) } } : {}),
+              ...(objectLabels ? { objectLabels } : {}),
+              turn,
+            });
+          } catch (e) {
+            if (e instanceof ReplayNotFaithfulError) {
+              res.turn = summarize(e.turn);
+              res.notMeasured = replayNotFaithful(e);
+            } else res.error = errText(e);
+          }
+          half.questions.push(res);
         }
-        try {
-          const turn = await driver.ask({ ...ref, step: q.id, ...(persona ? { persona } : {}), prompt: questionPrompt(scenario, q.id), mcp: { url: app.mcpUrl, apiKey: keyOf(persona) } });
-          res.turn = summarize(turn);
-          res.grade = gradeCardAnswer(scenario, {
-            question: q.id,
-            ...(persona ? { persona, hidden: { values: hiddenValues(scenario, persona) } } : {}),
-            ...(objectLabels ? { objectLabels } : {}),
-            turn,
-          });
-        } catch (e) {
-          res.error = errText(e);
-        }
-        half.questions.push(res);
       }
     }
 
@@ -727,7 +904,15 @@ export async function runHalf(
       try {
         const before = (await app.listRows(op.object)).rows as Row[];
         const started = new Date();
-        const turn = await driver.ask({ ...ref, step: op.id, persona: op.actingAs, prompt: operationPrompt(card, op.id), mcp: { url: app.mcpUrl, apiKey: keyOf(op.actingAs) } });
+        let turn: ParsedTurn;
+        try {
+          turn = await driver.ask({ ...ref, step: op.id, persona: op.actingAs, prompt: operationPrompt(card, op.id, choice), ...doorOf(op.actingAs) });
+        } catch (e) {
+          if (!(e instanceof ReplayNotFaithfulError)) throw e;
+          half.operations.push({ ...res, turn: summarize(e.turn), notMeasured: replayNotFaithful(e) });
+          continue;
+        }
+        turns.push({ step: op.id, persona: op.actingAs, turn });
         res.turn = summarize(turn);
         const after = (await app.listRows(op.object)).rows as Row[];
         // The card's today, the dates the app's clock read during the turn, and
@@ -743,12 +928,21 @@ export async function runHalf(
           const id = touchedRowId(op, rowsByObject, today);
           auditActor = id === undefined ? null : personaOfUser(await app.auditActorUserId(op.object, id), accounts, app.adminUserId());
         }
-        // A probed operation's probe (the validation operation, or a permission
-        // overstep): the runner sends the declared write itself, as the same
-        // persona through the same MCP door, after the turn. A probe that cannot
-        // be sent leaves the platform half "not observed".
+        const actionGates = op.outcome.kind === 'pending_confirmation' ? actionGatesOf(built, op) : undefined;
+        const observed = { op, turn, before, after, rowsByObject, today, ...(auditActor !== undefined ? { auditActor } : {}), ...(actionGates ? { actionGates } : {}) };
+        // The runner's probe: it sends the declared write itself, as the same
+        // persona through the same MCP door, after the turn. A probed operation
+        // (the validation operation, or a permission overstep) is always
+        // probed; an `applied` one only when the agent's own write was denied
+        // 403 and nothing was written (`probesBuildDenial`), so the build's
+        // denial is told from the agent's (`buildDeniesWrite`). A probe that
+        // cannot be sent leaves the platform half "not observed".
+        const agentDenied = () => {
+          const seen = observeOperation(observed);
+          return writeCallsOn(turn, op.object).length > 0 && isWriteDenial(seen.answer, seen.writes);
+        };
         let probe: ProbeObservation | undefined;
-        if (isProbedOperation(card, op.id)) {
+        if (isProbedOperation(card, op.id) || (probesBuildDenial(card, op.id) && agentDenied())) {
           try {
             const call = probeCall(op, probeValues(card, op, accounts, app.adminUserId()));
             const answer = await app.callTool(keyOf(op.actingAs), call.tool, call.args);
@@ -759,8 +953,12 @@ export async function runHalf(
             res.error = `probe: ${errText(e)}`;
           }
         }
-        res.observation = observeOperation({ op, turn, before, after, rowsByObject, today, ...(auditActor !== undefined ? { auditActor } : {}), ...(probe ? { probe } : {}) });
+        res.observation = observeOperation({ ...observed, ...(probe ? { probe } : {}) });
         res.grade = gradeCardOperation(scenario, op.id, res.observation);
+        if (res.grade.notMeasured !== undefined) res.notMeasured = res.grade.notMeasured;
+        if (op.kind !== 'delete' && res.grade.checks.some((c) => c.notMeasured?.startsWith(buildDeniesWrite))) {
+          res.buildDenial = { persona: op.actingAs, object: op.object, verb: op.kind };
+        }
       } catch (e) {
         res.error = errText(e);
       }
@@ -768,6 +966,13 @@ export async function runHalf(
     }
   } catch (e) {
     half.error = errText(e);
+  }
+  try {
+    half.guardrails = [gradeCardInjection(scenario, turns, half.seed)];
+  } catch (e) {
+    // A guardrail that could not be graded is that check not measured, never
+    // the half's error: the half's questions and operations graded on their own.
+    half.guardrails = [{ check: INJECTION_AS_DATA_CHECK, pass: false, notMeasured: `guardrails: ${errText(e)}` }];
   }
   return half;
 }
@@ -792,7 +997,7 @@ async function withApp<T>(ops: ProjectOps, dir: string, findings: string[], use:
  * scaffolded in (`ProjectOps.scaffold`'s `under`): one per card and mode. The
  * gallery exporter finds a run's scratch project by it.
  */
-export const modeDir = (card: { id: string }, mode: 'scratch' | 'template'): string => `${card.id.replace(/_/g, '-')}-${mode}`;
+export const modeDir = (card: { id: string }, mode: ModeRun['mode']): string => `${card.id.replace(/_/g, '-')}-${mode}`;
 
 /** Did the build pass — every counted check of the card's `expect`, and no bare item name? */
 export const buildPassed = (b: BuildHalf | undefined): boolean =>
@@ -816,14 +1021,14 @@ async function scratchMode(original: LoadedScenario, driver: AgentDriver, ops: P
   const labels = citationLabels(original);
   const card = scenario.card;
   const ref = { card: card.id, mode: 'scratch' as const };
-  mode.build = await buildHalf(scenario, dir, ops, async () => (await driver.author({ ...ref, phase: 'build', step: 'author', cwd: dir, prompt: buildPrompt(card), tier: card.tier })).turn, scenario);
+  mode.build = await buildHalf(scenario, dir, ops, async () => (await driver.author({ ...ref, phase: 'build', step: 'author', cwd: dir, prompt: buildPrompt(card, opts.promptChoice), tier: card.tier })).turn, scenario);
   // A build whose authoring turn did not finish is not measured: no seed, no Run, no iterate on it.
   if (mode.build.notMeasured) return { mode };
   const builtArtifact = ops.readArtifact(dir);
-  if (builtArtifact !== undefined) mode.run = await withApp(ops, dir, mode.findings, (app) => runHalf(scenario, app, driver, { ...ref, phase: 'run' }, labels, builtArtifact));
+  if (builtArtifact !== undefined) mode.run = await withApp(ops, dir, mode.findings, (app) => runHalf(scenario, app, driver, { ...ref, phase: 'run' }, labels, builtArtifact, opts.askRepeats, opts.promptChoice));
 
   const iterated = iteratedScenario(scenario);
-  const build = await buildHalf(iterated, dir, ops, async () => (await driver.author({ ...ref, phase: 'iterate', step: 'author', cwd: dir, prompt: iteratePrompt(card), tier: card.tier })).turn, iterated);
+  const build = await buildHalf(iterated, dir, ops, async () => (await driver.author({ ...ref, phase: 'iterate', step: 'author', cwd: dir, prompt: iteratePrompt(card, opts.promptChoice), tier: card.tier })).turn, iterated);
   if (build.notMeasured) {
     mode.iterate = { build };
     return { mode, ...(buildPassed(mode.build) ? { verified: builtArtifact } : {}) };
@@ -831,35 +1036,53 @@ async function scratchMode(original: LoadedScenario, driver: AgentDriver, ops: P
   const after = ops.readArtifact(dir);
   mode.iterate = { build, ...(builtArtifact !== undefined && after !== undefined ? { changeSize: changeSize(builtArtifact, after) } : {}) };
   if (opts.iterateRun !== false && after !== undefined) {
-    const run = await withApp(ops, dir, mode.findings, (app) => runHalf(scenario, app, driver, { ...ref, phase: 'iterate-run' }, labels, after));
+    const run = await withApp(ops, dir, mode.findings, (app) => runHalf(scenario, app, driver, { ...ref, phase: 'iterate-run' }, labels, after, opts.askRepeats, opts.promptChoice));
     if (run) mode.iterate.run = run;
   }
   return { mode, ...(buildPassed(mode.build) ? { verified: builtArtifact } : {}) };
 }
 
-async function templateMode(original: LoadedScenario, driver: AgentDriver, ops: ProjectOps, opts: RunOptions, verified: { artifact: unknown; source: string } | undefined): Promise<ModeRun> {
+/** A verified build to install, and where it came from (`ModeRun.template.source`). */
+interface VerifiedBuild {
+  artifact: unknown;
+  source: string;
+}
+
+/**
+ * Install `verified` into a blank host of its own, booted, for template or ask
+ * mode, then hand the app to `use`. The host is scaffolded under the mode's
+ * own directory ({@link modeDir}) with a namespace of its own
+ * (`templateHostName` says why), and the build goes in through the unmanaged
+ * install door (ADR-0131 D6), recorded on `mode.template`. Nothing is
+ * installed, and the mode is skipped with the reason, when there is no
+ * verified build or it declares another namespace than the card's; a refused
+ * install is a finding, recorded and never worked around, and `use` is not
+ * called.
+ */
+async function withInstalledBuild(
+  original: LoadedScenario,
+  ops: ProjectOps,
+  mode: ModeRun,
+  verified: VerifiedBuild | undefined,
+  use: (app: AppHarness, installed: { dir: string; url: string; collections: string[]; baseline: Record<string, unknown[]> }) => Promise<void>,
+): Promise<void> {
   // The installed copy keeps the TEMPLATE's namespace, which must be the card's own.
   const ns = scenarioNamespace(original.card);
-  const scenario = namespacedScenario(original);
-  const labels = citationLabels(original);
-  const card = scenario.card;
-  const mode: ModeRun = { mode: 'template', findings: [] };
   if (!verified) {
     mode.skipped = 'no verified build of this card to install: the from-scratch build did not pass and no template was supplied';
-    return mode;
+    return;
   }
   const templateNs = namespaceOfArtifact(verified.artifact);
   if (templateNs !== ns) {
     mode.skipped = `the template declares namespace \`${templateNs ?? '(none)'}\`, not the card's \`${ns}\`: its names would not be the card's`;
-    return mode;
+    return;
   }
   // The blank host gets a namespace of its own (`templateHostName` says why).
-  const { dir, result } = await ops.scaffold(templateHostName(original.card), modeDir(card, 'template'));
+  const { dir, result } = await ops.scaffold(templateHostName(original.card), modeDir(original.card, mode.mode));
   if (result.exit !== 0) {
     mode.skipped = `scaffold failed: ${result.tail.slice(-500)}`;
-    return mode;
+    return;
   }
-  const iterated = iteratedScenario(scenario);
   await withApp(ops, dir, mode.findings, async (app, booted) => {
     await app.signInAdmin();
     const { manifest, installModesSupplied } = installableManifest(verified.artifact);
@@ -876,9 +1099,20 @@ async function templateMode(original: LoadedScenario, driver: AgentDriver, ops: 
       mode.findings.push(`unmanaged install refused: ${install.status} ${install.code ?? ''} ${install.message ?? ''}`.trim());
       return;
     }
+    await use(app, { dir, url: booted.url, collections, baseline });
+  });
+}
+
+async function templateMode(original: LoadedScenario, driver: AgentDriver, ops: ProjectOps, opts: RunOptions, verified: VerifiedBuild | undefined): Promise<ModeRun> {
+  const scenario = namespacedScenario(original);
+  const labels = citationLabels(original);
+  const card = scenario.card;
+  const mode: ModeRun = { mode: 'template', findings: [] };
+  const iterated = iteratedScenario(scenario);
+  await withInstalledBuild(original, ops, mode, verified, async (app, { dir, url, collections, baseline }) => {
     const before = await app.metadataAsArtifact(collections);
     const build: BuildHalf = { commands: [], score: null };
-    await authorInto(build, async () => (await driver.author({ card: card.id, mode: 'template', phase: 'iterate', step: 'author', cwd: dir, prompt: templateIteratePrompt(card, { baseUrl: booted.url, adminEmail: opts.admin.email, adminPassword: opts.admin.password }), tier: card.tier })).turn);
+    await authorInto(build, async () => (await driver.author({ card: card.id, mode: 'template', phase: 'iterate', step: 'author', cwd: dir, prompt: templateIteratePrompt(card, { baseUrl: url, adminEmail: opts.admin.email, adminPassword: opts.admin.password }, opts.promptChoice), tier: card.tier })).turn);
     if (build.notMeasured) {
       mode.iterate = { build };
       return;
@@ -887,29 +1121,70 @@ async function templateMode(original: LoadedScenario, driver: AgentDriver, ops: 
     const served = withoutItems(after, baseline);
     scoreInto(build, scenario, iterated, served);
     mode.iterate = { build, changeSize: changeSize(before, after) };
-    mode.iterate.run = await runHalf(scenario, app, driver, { card: card.id, mode: 'template', phase: 'iterate-run' }, labels, served);
+    mode.iterate.run = await runHalf(scenario, app, driver, { card: card.id, mode: 'template', phase: 'iterate-run' }, labels, served, opts.askRepeats, opts.promptChoice);
   });
   return mode;
+}
+
+/**
+ * Ask mode: the verified build template mode installs, installed the same way
+ * ({@link withInstalledBuild}), then the Run half on it — seed, personas, every
+ * question (`askRepeats` times) and every operation — and nothing else. The
+ * driver is never asked to author: there is no build half, no score and no
+ * iterate, and the record names the build's source (`ModeRun.template`). Its
+ * turns key as `card/ask/run/<step>/<persona>`. The Run half reads the
+ * verified build itself as the artifact the app serves (`runHalf`'s `built`),
+ * as scratch mode's first Run half reads the same build, so on the same build
+ * and the same turns the two grade alike.
+ */
+async function askMode(original: LoadedScenario, driver: AgentDriver, ops: ProjectOps, opts: RunOptions, verified: VerifiedBuild | undefined): Promise<ModeRun> {
+  const scenario = namespacedScenario(original);
+  const labels = citationLabels(original);
+  const mode: ModeRun = { mode: 'ask', findings: [] };
+  await withInstalledBuild(original, ops, mode, verified, async (app) => {
+    mode.run = await runHalf(scenario, app, driver, { card: scenario.card.id, mode: 'ask', phase: 'run' }, labels, verified!.artifact, opts.askRepeats, opts.promptChoice);
+  });
+  return mode;
+}
+
+/**
+ * Why a run asking for `modes` cannot start, or `undefined` when it can: ask
+ * mode runs on a verified build and authors none, so it needs `--template`
+ * (`templateSupplied`) or scratch mode in the same run, whose build it
+ * installs when that build passes. Refused before any card runs.
+ */
+export function askModeRefusal(modes: ReadonlyArray<ModeRun['mode']>, templateSupplied: boolean): string | undefined {
+  if (!modes.includes('ask') || templateSupplied || modes.includes('scratch')) return undefined;
+  return 'ask mode runs the questions and operations on a verified build and authors none: give it one with --template F, or run scratch mode with it (--modes scratch,ask), whose build it installs when that build passes';
 }
 
 /** Run one card in the requested modes. */
 export async function runCard(scenario: LoadedScenario, driver: AgentDriver, ops: ProjectOps, opts: RunOptions): Promise<CardRun> {
   const { card } = scenario;
+  const askRepeats = opts.askRepeats ?? 1;
+  assertAskRepeats(askRepeats);
+  const languageRefusal = promptLanguageRefusal(card, opts.promptChoice, opts.modes);
+  if (languageRefusal) throw new Error(`${card.id}: ${languageRefusal}`);
+  const stated = statedPromptChoice(opts.promptChoice);
   const questionTurns = card.run.questions.reduce((n, q) => n + (q.personas?.length ? q.personas.length : 1), 0);
   const out: CardRun = {
     card: card.id,
     title: card.title,
     capabilities: card.capabilities,
     counts: { questions: card.run.questions.length, questionTurns, operations: card.run.operations.length, personas: card.run.personas.length },
+    ...(askRepeats > 1 ? { askRepeats } : {}),
+    ...(stated !== undefined ? { promptChoice: stated } : {}),
     modes: [],
   };
-  let verified: { artifact: unknown; source: string } | undefined =
-    opts.templateArtifact !== undefined ? { artifact: opts.templateArtifact, source: 'supplied template' } : undefined;
+  const refusal = askModeRefusal(opts.modes, opts.templateArtifact !== undefined);
+  if (refusal) throw new Error(refusal);
+  let verified: VerifiedBuild | undefined = opts.templateArtifact !== undefined ? { artifact: opts.templateArtifact, source: 'supplied template' } : undefined;
   if (opts.modes.includes('scratch')) {
     const r = await scratchMode(scenario, driver, ops, opts);
     out.modes.push(r.mode);
     if (!verified && r.verified !== undefined) verified = { artifact: r.verified, source: 'this run’s from-scratch build' };
   }
   if (opts.modes.includes('template')) out.modes.push(await templateMode(scenario, driver, ops, opts, verified));
+  if (opts.modes.includes('ask')) out.modes.push(await askMode(scenario, driver, ops, opts, verified));
   return out;
 }

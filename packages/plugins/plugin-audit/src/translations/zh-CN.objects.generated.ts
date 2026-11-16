@@ -41,10 +41,11 @@ export const zhCNObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "平台管理员权限变更",
           action_invocation: "动作调用",
           package_uninstall: "卸载软件包",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "导入非托管软件包",
+          credential_use: "凭据使用",
+          scim_refused: "SCIM 请求被拒",
+          audit_signing_key_change: "审计签名密钥变更",
+          dataset_query: "数据集查询"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const zhCNObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

@@ -103,8 +103,6 @@ function walkPushes(code: string): string[] {
 const SITE_MEMBER_CALLS: Record<ObjectSite, Record<string, string>> = {
   validation: {
     get: 'a Map read (the object index, the field definitions)',
-    indexOf: 'a string offset, reading the slot key',
-    isArray: '`Array.isArray`',
     push: "appends a finding to the walk's list",
   },
   formula: {
@@ -122,6 +120,7 @@ const SITE_MEMBER_CALLS: Record<ObjectSite, Record<string, string>> = {
 const WALK_PUSHES: Record<string, string> = {
   bulkConfirmTextIssues: "a list view's bulk `confirmText` template slots: no rule or field expression",
   actionCopyTemplateIssues: "an action's copy template slots: no rule or field expression",
+  hookRefusalTemplateIssues: "a hook refusal's template sentences over its declared params: no rule or field expression",
 };
 
 /** The passes the walk pushes whole from INSIDE a site's regions: classified with that site's calls, in `SITE_CALLS`. */
@@ -139,14 +138,17 @@ const CYCLE = {
   },
 };
 
-/** Where each site's calls are read: the rule loop and the `check` helper it calls; the field-formula pass and what follows the fields loop. */
+/** Where each site's calls are read: the rule pass (`judgeValidationRule`) and the `check` helper it calls; the field-formula pass and what follows the fields loop. */
 const SITE_REGIONS: Record<ObjectSite, Array<[string, string]>> = {
   validation: [
     ['  const check = (', '  const fieldRuleRootVerdict = ('],
-    ['    for (const rule of recordsOf(validations)) {', '    // Field-level formulas'],
+    // [#33154] The rule pass, hoisted out of the object walk so the extension
+    // walk judges an extension's rules by the same body; the object walk's
+    // loop now calls it and nothing else.
+    ['  const judgeValidationRule = (', '  // ── Object validation-rule'],
   ],
   formula: [
-    ['  const judgeFieldFormula = (', '  // ── Object validation-rule'],
+    ['  const judgeFieldFormula = (', '  const judgeValidationRule = ('],
     [
       '      judgeFieldFormula(fname, f, { objectName, optionFields: optionFieldNames, fieldDefs });\n    }',
       "    // [#26646] A field group's section predicate",
@@ -452,6 +454,8 @@ type FlowFixture = {
   expression: string;
   severity: 'error' | 'warning';
   names: string;
+  /** [#33176] The flow's declared variables, handed to the entry as the caller hands them and declared on the hand-written flow. */
+  variables?: Array<Record<string, unknown>>;
 };
 
 type FlowClassified =
@@ -502,11 +506,17 @@ const FLOW_CALLS: Record<string, FlowClassified> = {
     fixture: { objects: [FLOW_OBJ], expression: 'foo.bar == 1' },
     buildDoor: {},
   },
+  // [#33176] The flow's declared variables, which the caller hands the entry
+  // and the probe declares; without them it cannot fire (pinned below).
   warnShadowedFieldReads: {
-    kind: 'pass-silent-here',
-    why: "needs the flow's declared variables, which the tool is not handed; the probe declares none",
-    fixture: { objects: [FLOW_OBJ], expression: "title == 'x'" },
-    buildDoor: { variables: [{ name: 'title', type: 'text' }] },
+    kind: 'pass',
+    fixture: {
+      objects: [FLOW_OBJ],
+      expression: "title == 'x'",
+      severity: 'warning',
+      names: '`title`',
+      variables: [{ name: 'title', type: 'text' }],
+    },
   },
   refuseStoredMetadataBodyHop: {
     kind: 'pass-silent-here',
@@ -597,7 +607,7 @@ function flowGateOn(
 function flowEntryOn(
   objects: Array<Record<string, unknown>>,
   expression: string,
-  opts: { triggerKind?: AuthoredFlowTrigger; startCondition?: string } = {},
+  opts: { triggerKind?: AuthoredFlowTrigger; startCondition?: string } & HandFlowOverrides = {},
 ) {
   return judgeAuthoredSiteExpression({ site: 'flow_condition', objectName: 'obj', expression, objects, ...opts })
     .map((i) => [i.severity ?? 'error', i.message]);
@@ -617,12 +627,13 @@ describe('judgeAuthoredSiteExpression at a flow condition — every gate pass is
 
   for (const [name, classified] of Object.entries(FLOW_CALLS)) {
     if (classified.kind === 'pass') {
-      const { objects, expression, severity, names } = classified.fixture;
+      const { objects, expression, severity, names, variables } = classified.fixture;
+      const declared = variables ? { variables } : {};
       for (const slot of ['start', 'decision', 'edge'] as const) {
         it(`${name} refuses through the entry as the gate does at a flow's ${slot} condition`, () => {
-          const gate = flowGateOn(objects, expression, { slot });
+          const gate = flowGateOn(objects, expression, { slot, ...declared });
           expect(gate.length, 'the fixture trips the gate').toBeGreaterThan(0);
-          const entry = flowEntryOn(objects, expression);
+          const entry = flowEntryOn(objects, expression, declared);
           expect(entry).toEqual(gate);
           expect(entry.map(([level]) => level)).toEqual(gate.map(() => severity));
           expect(entry.some(([, message]) => message!.includes(names))).toBe(true);
@@ -709,9 +720,74 @@ describe('judgeAuthoredSiteExpression at a flow condition — every gate pass is
     expect(flowEntryOn([withOwn, BAL], "record.title == 'x'")).toEqual([]);
   });
 
+  // [#33435] The entry strips the injected columns and runs the walk as a flow
+  // write, so the build's injected-column null guard reaches it: an unguarded
+  // ordering over `owner_id` comes back with the publish gate's finding (it
+  // answered clean before), and the guarded spelling stays clean.
+  it('an unguarded ordering over an injected column returns the publish gate\'s null-guard finding (#33435)', () => {
+    const served = applyInjectedSystemColumns(FLOW_OBJ);
+    const entry = flowEntryOn([served], "record.owner_id > 'a'");
+    expect(entry).toHaveLength(1);
+    expect(entry[0]![1]).toContain('`record.owner_id`');
+    expect(entry).toEqual(flowGateOn([served], "record.owner_id > 'a'"));
+    expect(flowEntryOn([served], "record.owner_id != null && record.owner_id > 'a'")).toEqual([]);
+  });
+
   it('answers nothing when the object is not among the definitions', () => {
     expect(judgeAuthoredSiteExpression({ site: 'flow_condition', objectName: 'nope', expression: 'record.days > 3', objects: [FLOW_OBJ] }))
       .toEqual([]);
+  });
+});
+
+// ── [#33176] The flow's declared variables, at a flow condition ───────────
+//
+// Handed the flow's `variables`, the probe declares them, and the gate's
+// shadowed-read warning (`warnShadowedFieldReads`, a `pass` in the table
+// above with those variables) comes back through the entry. Handed none, the
+// probe is the flow it was before the key, and the warning cannot fire.
+
+describe("judgeAuthoredSiteExpression with the flow's declared variables (#33176)", () => {
+  const SHADOWING = [{ name: 'title', type: 'text' }];
+
+  it('declares the variables it is handed, as handed, and no `variables` key without them', () => {
+    const variables = [{ name: 'title', type: 'text', isInput: true }, { name: 'limit', type: 'number' }];
+    expect(authoredFlowProbe({ objectName: 'obj', expression: 'true', variables }).variables).toEqual(variables);
+    expect(Object.keys(authoredFlowProbe({ objectName: 'obj', expression: 'true' }))).not.toContain('variables');
+  });
+
+  it('CONTROL — without the variables the shadowed read answers nothing, at the gate and through the entry', () => {
+    // A flow that declares no variable gets no warning at the runtime door…
+    expect(flowGateOn([FLOW_OBJ], "title == 'x'")).toEqual([]);
+    // …and the probe, handed none, is that flow.
+    expect(flowEntryOn([FLOW_OBJ], "title == 'x'")).toEqual([]);
+  });
+
+  it('a variable named like no field of the object gets no warning', () => {
+    const variables = [{ name: 'threshold', type: 'number' }];
+    for (const expression of ['threshold > 3', "record.title == 'x' && threshold > 3"]) {
+      expect(flowGateOn([FLOW_OBJ], expression, { variables }), expression).toEqual([]);
+      expect(flowEntryOn([FLOW_OBJ], expression, { variables }), expression).toEqual([]);
+    }
+  });
+
+  it('warns on the bare read alone: `record.FIELD` reads the field, whatever the variables', () => {
+    expect(flowGateOn([FLOW_OBJ], "record.title == 'x'", { variables: SHADOWING })).toEqual([]);
+    expect(flowEntryOn([FLOW_OBJ], "record.title == 'x'", { variables: SHADOWING })).toEqual([]);
+    const both = flowGateOn([FLOW_OBJ], 'record.title == title', { variables: SHADOWING });
+    expect(both.map(([level]) => level)).toEqual(['warning']);
+    expect(flowEntryOn([FLOW_OBJ], 'record.title == title', { variables: SHADOWING })).toEqual(both);
+  });
+
+  it('answers as the gate on every trigger kind and after a start condition', () => {
+    for (const kind of ['record_change', 'time_relative', 'schedule', 'api', 'none'] as const) {
+      const gate = flowGateOn([FLOW_OBJ], "title == 'x'", { kind, variables: SHADOWING });
+      expect(gate.map(([level]) => level), kind).toEqual(['warning']);
+      expect(flowEntryOn([FLOW_OBJ], "title == 'x'", { triggerKind: kind, variables: SHADOWING }), kind).toEqual(gate);
+    }
+    const startCondition = 'record.days != null';
+    const gate = flowGateOn([FLOW_OBJ], "title == 'x'", { startCondition, variables: SHADOWING });
+    expect(gate.map(([level]) => level)).toEqual(['warning']);
+    expect(flowEntryOn([FLOW_OBJ], "title == 'x'", { startCondition, variables: SHADOWING })).toEqual(gate);
   });
 });
 

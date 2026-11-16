@@ -1358,6 +1358,114 @@ describe('[ADR-0111 D7] no inert grants', () => {
     const rule = engine._tables.sys_record_share.find(r => r.id === 'shr_rule');
     expect(rule?.source).toBe('rule'); // untouched
   });
+
+  it('a second rule reaching the same user writes its own row; the first rule\'s row keeps its level and id', async () => {
+    engine._tables.sys_record_share = [{
+      id: 'shr_rule', object_name: 'account', record_id: 'a1',
+      recipient_type: 'user', recipient_id: 'bob', access_level: 'edit',
+      source: 'rule', source_id: 'srule_1',
+    }];
+    const second = await svc.grant(
+      { object: 'account', recordId: 'a1', recipientId: 'bob', accessLevel: 'read', source: 'rule', sourceId: 'srule_2' } as any,
+      { isSystem: true } as any,
+    );
+    expect(second.id).not.toBe('shr_rule');
+    const rows = engine._tables.sys_record_share.map(r => `${r.source_id}:${r.access_level}`).sort();
+    expect(rows).toEqual(['srule_1:edit', 'srule_2:read']);
+
+    // The same rule granting again upserts its own row, never the other's.
+    await svc.grant(
+      { object: 'account', recordId: 'a1', recipientId: 'bob', accessLevel: 'edit', source: 'rule', sourceId: 'srule_2' } as any,
+      { isSystem: true } as any,
+    );
+    expect(engine._tables.sys_record_share.map(r => `${r.source_id}:${r.access_level}`).sort())
+      .toEqual(['srule_1:edit', 'srule_2:edit']);
+  });
+
+  // A direct (non-system) grant that carries a `source` other than 'manual',
+  // or any `sourceId`, is refused before the upsert is reached, so it has no
+  // key to keep — pinned in "a direct grant is always a manual share" below.
+});
+
+describe('[ADR-0111 D7] a direct grant is always a manual share', () => {
+  let engine: ReturnType<typeof makeFakeEngine>;
+  let svc: SharingService;
+  let reads: number;
+  const OWNER = { userId: 'alice' };
+  const SYSTEM = { isSystem: true } as any;
+  const base = { object: 'account', recordId: 'a1', recipientId: 'bob', accessLevel: 'read' as const };
+  beforeEach(() => {
+    engine = makeFakeEngine({ account: ACCOUNT_SCHEMA, sys_record_share: {} });
+    svc = new SharingService({ engine });
+    engine._tables.account = [{ id: 'a1', owner_id: 'alice' }];
+    reads = 0;
+    const find = engine.find.bind(engine);
+    engine.find = async (object: string, options?: any) => { reads += 1; return find(object, options); };
+  });
+
+  const refused: Array<[string, Record<string, unknown>]> = [
+    ["source 'rule' with a sourceId", { source: 'rule', sourceId: 'srule_1' }],
+    ["source 'rule' alone", { source: 'rule' }],
+    ["source 'team'", { source: 'team', sourceId: 'team_1' }],
+    ["source 'inherited'", { source: 'inherited' }],
+    ['an unknown source string', { source: 'bogus' }],
+    ['an empty source string', { source: '' }],
+    ['a sourceId with no source', { sourceId: 'srule_1' }],
+    ["a sourceId with source 'manual'", { source: 'manual', sourceId: 'srule_1' }],
+  ];
+
+  for (const [label, extra] of refused) {
+    it(`refuses a non-system caller's grant with ${label}: VALIDATION_FAILED, nothing read, no row`, async () => {
+      await expect(svc.grant({ ...base, ...extra } as any, OWNER)).rejects.toThrow(/^VALIDATION_FAILED: /);
+      expect(engine._tables.sys_record_share ?? []).toHaveLength(0);
+      // Refused ahead of the authorization pre-flight's record read and the
+      // upsert's lookup: a refused caller pays nothing.
+      expect(reads).toBe(0);
+    });
+  }
+
+  it('refuses a caller without manage-shares rights the same way, before authorization reads anything', async () => {
+    await expect(
+      svc.grant({ ...base, source: 'rule', sourceId: 'srule_1' } as any, { userId: 'mallory' }),
+    ).rejects.toThrow(/^VALIDATION_FAILED: /);
+    expect(reads).toBe(0);
+    expect(engine._tables.sys_record_share ?? []).toHaveLength(0);
+  });
+
+  it('CONTROL: no source grants a manual share', async () => {
+    const r = await svc.grant(base, OWNER);
+    expect(r.source).toBe('manual');
+    expect(engine._tables.sys_record_share).toHaveLength(1);
+    expect(engine._tables.sys_record_share[0]).toMatchObject({ source: 'manual', source_id: null });
+  });
+
+  it('CONTROL: a null source and a null sourceId read as absent and grant a manual share', async () => {
+    const r = await svc.grant({ ...base, source: null, sourceId: null } as any, OWNER);
+    expect(r.source).toBe('manual');
+    expect(engine._tables.sys_record_share[0]).toMatchObject({ source: 'manual', source_id: null });
+  });
+
+  it("CONTROL: an explicit 'manual' source grants a manual share, and its revoke still works", async () => {
+    const r = await svc.grant({ ...base, source: 'manual' }, OWNER);
+    expect(engine._tables.sys_record_share[0]).toMatchObject({ source: 'manual', source_id: null });
+    await svc.revoke(r.id, OWNER, { object: 'account', recordId: 'a1' });
+    expect(engine._tables.sys_record_share).toHaveLength(0);
+  });
+
+  it('CONTROL: the system context still writes a rule share with its sourceId', async () => {
+    const r = await svc.grant({ ...base, source: 'rule', sourceId: 'srule_1' }, SYSTEM);
+    expect(r).toMatchObject({ source: 'rule', source_id: 'srule_1' });
+    expect(engine._tables.sys_record_share).toHaveLength(1);
+    expect(engine._tables.sys_record_share[0]).toMatchObject({ source: 'rule', source_id: 'srule_1' });
+  });
+
+  it('CONTROL: a non-system revoke of a system-written rule share is still CONFLICT', async () => {
+    const r = await svc.grant({ ...base, source: 'rule', sourceId: 'srule_1' }, SYSTEM);
+    await expect(
+      svc.revoke(r.id, OWNER, { object: 'account', recordId: 'a1' }),
+    ).rejects.toThrow(/^CONFLICT: /);
+    expect(engine._tables.sys_record_share).toHaveLength(1);
+  });
 });
 
 describe('[ADR-0111 D5] sys_record_share read self-scope (middleware)', () => {

@@ -20,12 +20,13 @@ import { buildApiError } from '../error-envelope.js';
 import {
     admitAutomationAddress,
     automationAddressRegistryOf,
-    bareNameRefusal,
+    bareNameAdmission,
     readAutomationAddress,
     automationRouteAllow,
     AUTOMATION_DOOR_LITERALS,
     type AutomationAddressRefusal,
     type AutomationAddressRegistry,
+    type AutomationAddressSlot,
 } from './automation-address.js';
 // [#31696] One holder's flow of a shared name, served from its own slot; a
 // start's admission walks callees from the calling flow's package.
@@ -83,6 +84,8 @@ import { flowStartRefusal, isAiServiceAccount } from '../flow-start-admission.js
 import {
     apiForwardCredentialKind,
     callData,
+    collectActionDeclarations,
+    readMergedItems,
     refuseUnreadableFlowStartRecords,
     type FlowStartRecordKeys,
 } from '../action-execution.js';
@@ -1173,6 +1176,12 @@ async function respondToConnectorConnectionDoor(
     body: unknown,
     context: HttpProtocolContext,
     query: unknown,
+    /**
+     * [ADR-0150 D9, #31699] The package the namespace address admitted the
+     * door to, for a connector name two packages hold: that package's
+     * instance is the one connected, read or revoked.
+     */
+    connectorPackage?: string,
 ): Promise<HttpDispatcherResult> {
     const isCallback = parts[1] === CONNECTOR_OAUTH_SEGMENT && parts[2] === CONNECTOR_OAUTH_CALLBACK_SEGMENT;
     const queryRefusal = unknownQueryParamRefusalMessage(
@@ -1219,7 +1228,12 @@ async function respondToConnectorConnectionDoor(
             if ('refusal' in read) return { handled: true, response: deps.error(read.refusal, 400, { code: 'VALIDATION_ERROR' }) };
             client = read.client;
         }
-        const answer = await call.call(svc, { connector, context: executionContext, ...(client ? { client } : {}) });
+        const answer = await call.call(svc, {
+            connector,
+            ...(connectorPackage !== undefined ? { package: connectorPackage } : {}),
+            context: executionContext,
+            ...(client ? { client } : {}),
+        });
         return { handled: true, response: deps.success(answer) };
     } catch (err) {
         const refusal = connectorCredentialRefusal(deps, err);
@@ -1244,7 +1258,7 @@ async function automationRegistryOf(deps: DomainHandlerDeps, context: HttpProtoc
 
 /**
  * [ADR-0150 D5, child G1] The item a BARE by-name run or read names, for the
- * bare name's `409` (`bareNameRefusal`): the flow of the trigger, toggle, read
+ * bare name's `409` (`bareNameAdmission`): the flow of the trigger, toggle, read
  * and run doors, and the connector instance of the connection door. The
  * definition writes (`PUT` / `DELETE /:name`, the clone) are absent: they
  * answer their own `409` with its remedy (`flowWriteRefusal`).
@@ -1268,15 +1282,19 @@ function bareByNameItem(parts: readonly string[], method: string): { type: 'flow
     return undefined;
 }
 
-/** [ADR-0150 D5, child G1] A bare by-name door's `409`, when the resolver refuses its name. */
-function bareByNameRefusal(
+/**
+ * [ADR-0150 D5, child G1] A bare by-name door's `409`, when the resolver
+ * refuses its name. [ADR-0150 D3, #33386] Judged over the served holders
+ * (`bareNameAdmission`): a name two packages hold whose one served holder
+ * remains is that holder's slot, never a `409` naming a disabled package.
+ */
+function bareByNameAdmission(
     registry: AutomationAddressRegistry | undefined,
     parts: readonly string[],
     method: string,
-): AutomationAddressRefusal | undefined {
+): AutomationAddressRefusal | AutomationAddressSlot | undefined {
     const item = bareByNameItem(parts, method);
-    const refusal = item ? bareNameRefusal(registry, item.type, item.name) : undefined;
-    return refusal ? { status: 409, refusal } : undefined;
+    return item ? bareNameAdmission(registry, item.type, item.name) : undefined;
 }
 
 /**
@@ -2282,8 +2300,9 @@ function notifyChannelEntries(value: unknown): NotifyChannelEntry[] {
  *    delivers nothing whatever it names (it records a skipped step), and a
  *    messaging service with no `getKnownChannels()` (another implementation of
  *    the service) cannot be enumerated: neither is judged. Nor is a reader
- *    that throws or answers something other than a list: an unreadable
- *    registry gives no verdict, and the save goes on as before.
+ *    that throws, answers something other than a list, or answers a list
+ *    with any member that is not a `{ id: string }`: an unreadable registry
+ *    gives no verdict, and the save goes on as before.
  *
  * Read per request and recorded nowhere: the answer is the registry as it
  * stands at this save (AGENTS.md, "Startup registry reads").
@@ -2312,8 +2331,10 @@ async function refuseUnknownNotifyChannels(
     // A reader that throws, or answers anything but a list, is a registry this
     // door cannot read: not judged, like a service with no reader at all. The
     // save goes on as it did before this check existed, and a delivery on an
-    // unknown channel still reports itself at run time. Members that are not a
-    // `{ id: string }` are not channels and are left out of the roster.
+    // unknown channel still reports itself at run time. So is a list with any
+    // member that is not a `{ id: string }` (the declared `NotifyChannelRegistry`
+    // shape): dropping such members would leave a roster that misses channels
+    // the reader does know, and refuse every name it carries.
     let read: unknown;
     try {
         read = messaging.getKnownChannels();
@@ -2321,10 +2342,10 @@ async function refuseUnknownNotifyChannels(
         return undefined;
     }
     if (!Array.isArray(read)) return undefined;
-    const known = (read as unknown[]).filter(
-        (entry): entry is { id: string; configured: boolean } =>
-            !!entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string',
-    );
+    const isChannel = (entry: unknown): entry is { id: string; configured: boolean } =>
+        !!entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string';
+    if (!(read as unknown[]).every(isChannel)) return undefined;
+    const known = read as Array<{ id: string; configured: boolean }>;
     const knownIds = known.map((entry) => entry.id);
 
     const lines: string[] = [];
@@ -2994,6 +3015,108 @@ async function unregisterAndDeleteFlow(
 }
 
 /**
+ * [ADR-0151 D3 rule 3] One service slot rule 2b reads its declarations from,
+ * resolved to the instance the same request's `/actions` door reads, in every
+ * host shape. The rule, as this function holds it: a read failure refuses the
+ * start when no leg of that door's order answers the name; where a later leg
+ * answers, the start is judged on that instance, as the `/actions` door would
+ * serve it. The smallest composition of the two resolvers that exist:
+ *
+ *  1. `resolveService`, the order every `/actions` read uses (`getObjectQL`
+ *     included): the request's own kernel first on a host that routes a
+ *     request to a kernel of its own, then the host kernel's scoped factory,
+ *     then its singletons. An instance it answers is the door's instance,
+ *     whichever leg answers it, a leg that did not resolve before it included.
+ *  2. Only on a miss, `resolveServiceOrLoud` classifies it: a name nothing
+ *     registered (or a scoped registration with no instance in this scope) is
+ *     absent, `undefined`; any other rejection is re-raised. The quiet probe
+ *     absorbs every rejection, so a miss there is absence or a failure it
+ *     swallowed, and this step is what tells the two apart. Its own order
+ *     (the host's scoped leg first) never decides WHICH instance is read: it
+ *     is asked only when step 1 found none.
+ *
+ * Scoped by the request's environment, as the door's reads are: unscoped, a
+ * scoped registration is a fault to the classifier.
+ *
+ * Per-leg loud resolution (a wired slot that fails on an earlier step refuses
+ * even when a later step answers) is a shared resolver change for every
+ * dispatcher door, tracked by the security lane; it is not in this function.
+ */
+async function resolveSlotAsActionsDoorReads(
+    deps: DomainHandlerDeps,
+    context: HttpProtocolContext,
+    name: 'protocol' | 'objectql' | 'metadata',
+): Promise<any> {
+    const served = await deps.resolveService(context, name, context?.environmentId);
+    if (served != null) return served;
+    return deps.resolveServiceOrLoud(context, name, context?.environmentId);
+}
+
+/**
+ * [ADR-0151 D3 rule 3] The action declarations the request's environment
+ * serves: what flow start admission's rule 2b reads, for an AI service
+ * account only, to find an action that targets the flow and declares
+ * `ai.requiresConfirmation: true` (`../flow-start-admission.ts`). Every row is
+ * a `collectActionDeclarations` row, from these sources:
+ *
+ *  - where the `protocol` slot serves the merged listings (`getMetaItems`), its
+ *    merged object and action listings alone — the reading the addressed
+ *    `/actions` door, the bare door's holder rule and the MCP bridge make;
+ *  - otherwise every source the bare `/actions` door resolves a declaration
+ *    from on such a host: the ObjectQL registry's objects (their embedded
+ *    actions) and standalone `action` items, and the metadata service's
+ *    object and action listings.
+ *
+ * Each of the three slots (`protocol`, `objectql`, `metadata`) is the
+ * instance the same request's `/actions` door reads, in every host shape
+ * ({@link resolveSlotAsActionsDoorReads}: the request's own kernel first). A
+ * slot nothing registered is absent and contributes nothing; a slot that no
+ * leg of that door's order answers, because a leg failed to resolve it,
+ * throws; and where a later leg answers the name, that instance is read, as
+ * the `/actions` door would serve it. Each listing (the two merged ones, the
+ * registry's two, the metadata service's objects and its standalone `action`
+ * items) is read where its throw travels. Any such throw makes the predicate
+ * refuse the start `503`. So a host that serves no declaration from any of
+ * these sources finds none, and a read failure that reaches this function as
+ * a throw admits nothing. A source that answers a failed read of its own
+ * without throwing is not told apart here: the metadata service's plural
+ * listing reports a loader that failed and answers the other loaders' rows,
+ * and those rows are what is judged.
+ */
+async function servedActionDeclarations(
+    deps: DomainHandlerDeps,
+    context: HttpProtocolContext,
+): Promise<Array<{ action: unknown; objectName: string }>> {
+    const protocol = await resolveSlotAsActionsDoorReads(deps, context, 'protocol');
+    if (typeof protocol?.getMetaItems === 'function') {
+        const objects = await readMergedItems(protocol, 'object');
+        const actions = await readMergedItems(protocol, 'action');
+        return collectActionDeclarations(deps, undefined, objects, actions);
+    }
+    const rows: Array<{ action: unknown; objectName: string }> = [];
+    // The engine the `/actions` door's `getObjectQL` reads. A slot that no step
+    // of that door's order answers, because a step failed to resolve it, throws,
+    // which that probe does not; where a later step answers, that engine is read.
+    const engine = (await resolveSlotAsActionsDoorReads(deps, context, 'objectql')) as
+        | { registry?: { listItems?: (type: string) => unknown[] } }
+        | undefined;
+    const registry = engine?.registry;
+    if (typeof registry?.listItems === 'function') {
+        rows.push(...await collectActionDeclarations(deps, undefined, registry.listItems('object'), registry.listItems('action')));
+    }
+    const metadata = await resolveSlotAsActionsDoorReads(deps, context, 'metadata');
+    if (typeof metadata?.listObjects === 'function' || typeof metadata?.loadMany === 'function') {
+        // Both listings read HERE and handed over, so a throw of either one
+        // travels: `collectActionDeclarations` reads a throwing standalone
+        // listing it is left to read as no standalone item, by design.
+        const objects: unknown[] = typeof metadata.listObjects === 'function' ? (await metadata.listObjects()) ?? [] : [];
+        const actions: unknown[] = typeof metadata.loadMany === 'function' ? (await metadata.loadMany('action')) ?? [] : [];
+        rows.push(...await collectActionDeclarations(deps, undefined, objects, actions));
+    }
+    return rows;
+}
+
+/**
  * [#9378] The ONE mapper both trigger doors answer through — `POST
  * /:name/trigger` and the legacy `POST /trigger/:name`, which
  * `client.automation.trigger()` calls. Extracted rather than written twice:
@@ -3125,12 +3248,24 @@ async function respondToFlowTrigger(
     // account is therefore refused an elevated (`runAs: 'system'`) flow at
     // this route, and told where the opt-in stands: an `ai.exposed` action
     // that targets the flow, run through `/actions` or MCP `run_action`.
-    const startRefusal = await flowStartRefusal(automationService, flowName, context?.executionContext, { aiExposed: false });
+    //
+    // [ADR-0151 D3 rule 3] And the confirmation an action declares travels
+    // with what it starts: this door states the environment's action
+    // declarations (`servedActionDeclarations`), so an account's start of a
+    // flow that a confirmation-gated action targets is refused with the action
+    // door's own `428`, whatever the request carries. A declaration read that
+    // fails is refused by the predicate itself, a flat `503`, and nothing runs.
+    const startRefusal = await flowStartRefusal(automationService, flowName, context?.executionContext, {
+        aiExposed: false,
+        actionDeclarations: () => servedActionDeclarations(deps, context),
+    });
     if (startRefusal) {
+        const details = 'details' in startRefusal ? startRefusal.details : undefined;
         return {
             handled: true,
             response: deps.error(startRefusal.message, startRefusal.status, {
                 code: startRefusal.code,
+                ...(details ?? {}),
             }),
         };
     }
@@ -3846,16 +3981,35 @@ export async function handleAutomationRequest(deps: DomainHandlerDeps, path: str
     // the run carries its slot key, so it is no guess at a name. A run of
     // another flow, or one whose key no one holder's slot is filed under,
     // keeps the `409`.
+    //
+    // [ADR-0150 D9, #31699] A connector name two packages hold, addressed by
+    // the namespace of one of them: the connection door connects, reads and
+    // revokes that holder's instance (`ConnectorConnectionRequest.package`).
+    //
+    // [ADR-0150 D3, #33386] Every admission here is judged over the served
+    // holders: a bare name two packages hold whose one served holder remains
+    // is served from that holder's slot, as its address is (seat ruling
+    // 6884403301). `item` is the address's item, else the bare door's own.
+    let connectorPackage: string | undefined;
     {
+        const door = bareByNameItem(parts, m);
+        const item = address.qualifier ? address.item : door;
         const admission = address.qualifier && address.item
             ? admitAutomationAddress(addressRegistry, address.qualifier, address.item)
-            : bareByNameRefusal(addressRegistry, parts, m);
-        if (admission?.status === 'slot') {
-            const slotted = bareByNameItem(parts, m)?.type === 'flow' && address.item
-                ? flowSlotView(automationService, admission.packageId, address.item.name)
+            : bareByNameAdmission(addressRegistry, parts, m);
+        if (admission?.status === 'slot' && item?.type === 'connector' && door?.type === 'connector') {
+            connectorPackage = admission.packageId;
+        } else if (admission?.status === 'slot') {
+            const slotted = door?.type === 'flow' && item
+                ? flowSlotView(automationService, admission.packageId, item.name)
                 : undefined;
-            if (!slotted) return { handled: true, response: automationAddressRefusalResponse(deps, { status: 409, refusal: admission.refusal }) };
-            automationService = slotted;
+            if (slotted) {
+                automationService = slotted;
+            } else if (address.qualifier || door?.type !== 'flow') {
+                return { handled: true, response: automationAddressRefusalResponse(deps, { status: 409, refusal: admission.refusal }) };
+            }
+            // [#33386] Else a bare flow name and no slot entries: the bare
+            // service, whose bare entries judge the served holders themselves.
         } else if (admission) {
             const byRun = !address.qualifier && admission.status === 409 && parts[1] === 'runs' && parts[2]
                 ? await runSlotView(automationService, parts[0], parts[2], admission.refusal.candidates.flatMap((c) => (c.kind === 'package' ? [c.packageId] : [])))
@@ -4060,7 +4214,7 @@ export async function handleAutomationRequest(deps: DomainHandlerDeps, path: str
     // ADR-0143 D5 — the connector connection door, ahead of `/:name` for the
     // reason `/connectors` is.
     if (isConnectorConnectionDoor(parts, m)) {
-        return respondToConnectorConnectionDoor(deps, automationService, parts, m, body, context, query);
+        return respondToConnectorConnectionDoor(deps, automationService, parts, m, body, context, query, connectorPackage);
     }
 
     if (parts[0] === 'connectors' && parts.length === 1 && m === 'GET') {

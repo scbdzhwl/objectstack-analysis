@@ -41,10 +41,11 @@ export const zhHantObjects: NonNullable<TranslationData['objects']> = {
           platform_admin_standing_change: "平台管理員權限變更",
           action_invocation: "動作呼叫",
           package_uninstall: "解除安裝套件",
-          package_unmanaged_import: "Package Unmanaged Import",
-          credential_use: "Credential Use",
-          scim_refused: "SCIM Refused",
-          audit_signing_key_change: "Audit Signing Key Change"
+          package_unmanaged_import: "匯入非受管套件",
+          credential_use: "憑證使用",
+          scim_refused: "SCIM 請求遭拒",
+          audit_signing_key_change: "稽核簽章金鑰變更",
+          dataset_query: "資料集查詢"
         }
       },
       user_id: {
@@ -328,6 +329,14 @@ export const zhHantObjects: NonNullable<TranslationData['objects']> = {
           window: "Window",
           late: "Late"
         }
+      },
+      part_index: {
+        label: "Part",
+        help: "Place among the consecutive checkpoints of at most 10,000 rows its window (or late sealing) is cut into, from 0"
+      },
+      final_part: {
+        label: "Final Part",
+        help: "Whether this is the last part of its window (or late sealing)"
       },
       window_start: {
         label: "Window Start"

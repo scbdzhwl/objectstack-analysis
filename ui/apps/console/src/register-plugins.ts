@@ -25,12 +25,10 @@
 
 import { ComponentRegistry } from '@object-ui/core';
 
-// Eager imports — core views needed on most pages.  These are cheap (no heavy
-// 3rd-party deps) so paying their cost upfront is the right tradeoff.
+// Eager imports — core views the console shell itself imports by name today
+// (the shell's own helpers and record surfaces reach these two packages'
+// entries), so a lazy stub here would move nothing out of the first load.
 import '@object-ui/plugin-grid';
-import '@object-ui/plugin-form';
-import '@object-ui/plugin-view';
-import '@object-ui/plugin-list';
 import '@object-ui/plugin-detail';
 
 // Lazy plugins — registered as deferred loaders.  The first time the
@@ -42,6 +40,58 @@ import '@object-ui/plugin-detail';
 // A lazily-registered tag is still a full member of the public contract:
 // `getPublicConfigs()` resolves these stubs, so `kind:'react'` pages get them
 // in scope before the chunk loads (objectui#2953).
+// The list view and the gallery: nothing on the first load imports
+// `@object-ui/plugin-list` by name, so each tag it registers is a stub that
+// loads the package the first time a schema names it.
+ComponentRegistry.registerLazy('list-view', () => import('@object-ui/plugin-list'), {
+  namespace: 'plugin-list',
+  category: 'Views',
+});
+ComponentRegistry.registerLazy('list', () => import('@object-ui/plugin-list'), {
+  namespace: 'view',
+  skipFallback: true,
+  category: 'view',
+});
+ComponentRegistry.registerLazy('object-gallery', () => import('@object-ui/plugin-list'), {
+  namespace: 'plugin-list',
+  category: 'view',
+});
+
+// The form and the object view: the shell takes their pure helpers from the
+// side-effect-free `/core` subpaths and draws their components behind
+// `lazy()`, so nothing on the first load imports either entry. Each tag the
+// entry registers is a stub with the namespace, `skipFallback` and category
+// that registration declares; the first schema naming one loads the package,
+// whose own registrations then replace every stub of it, once.
+for (const variant of ['object-form', 'embeddable-form', 'object-master-detail-form']) {
+  ComponentRegistry.registerLazy(variant, () => import('@object-ui/plugin-form'), {
+    namespace: 'plugin-form',
+    category: 'plugin',
+  });
+}
+ComponentRegistry.registerLazy('form', () => import('@object-ui/plugin-form'), {
+  namespace: 'view',
+  skipFallback: true,
+  category: 'view',
+});
+ComponentRegistry.registerLazy('line_items', () => import('@object-ui/plugin-form'), {
+  namespace: 'record',
+  skipFallback: true,
+  category: 'record',
+});
+for (const variant of ['object-view', 'view:simple']) {
+  ComponentRegistry.registerLazy(variant, () => import('@object-ui/plugin-view'), {
+    namespace: 'plugin-view',
+    category: 'view',
+  });
+}
+for (const variant of ['view-switcher', 'filter-ui', 'sort-ui']) {
+  ComponentRegistry.registerLazy(variant, () => import('@object-ui/plugin-view'), {
+    namespace: 'view',
+    category: 'view',
+  });
+}
+
 ComponentRegistry.registerLazy('object-map', () => import('@object-ui/plugin-map'), {
   namespace: 'plugin-map',
   category: 'view',

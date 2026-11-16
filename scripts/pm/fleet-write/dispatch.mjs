@@ -521,7 +521,41 @@
  *     (2); no answer, or any other status, is PREREQUISITE NOT MET (3): ⛔ an unread kind is never a pass. A
  *     `labels_add` the rule does not govern reads nothing.
  *
- * `labels_remove` is never asked: taking a label off is how a wrong one comes off.
+ * `labels_remove` is never asked by the kind rule: taking a label off is how a wrong one comes off.
+ *
+ * ## The stateless write — no open card left with no state, no parked card left with a holder
+ *
+ * label-write's `refuseStatelessWrite` (its header's section of the same name) is asked here of an actions file, per
+ * card, ⛔ never restated: `stateGuardRows` picks each card the stroke takes a `pm:*` state off (`labels_remove`),
+ * parks (`labels_add` of `PARKED_STATE_LABELS`) or assigns someone to (`assign`, since only the read knows whether the
+ * card already sits parked) without closing it (`issue_patch state: closed` in the same stroke is
+ * the third legal exit), `readStateGuard` READS it once — the same `GET`, place and route as the kind rule, sharing its
+ * answer when both read one card — and `judgeStateGuard` applies the stroke's steps in order and asks the predicate. A
+ * refusal is usage (2) and an unread card PREREQUISITE NOT MET (3), nothing sent for the whole file, a dry run
+ * included. A stroke that touches no card state and assigns no one reads nothing. Its last `issue_patch` with a
+ * `state` decides the card's end: `closed` is the legal exit, `open` makes the card judged OPEN whatever its read says.
+ *
+ * ## A raw comment carrying a record's tier (#33715)
+ *
+ * `post-stamped.mjs` and `label-write.mjs` write a `## Contract review` record whose `Served-tier:` names
+ * `CONTRACT_REVIEW_TIER` only on `--tier-evidence`, the reviewing run's transcript, that `verify-review-tier.mjs`
+ * passes. A `comment` or `comment_edit` in an actions file a seat hands THIS door is held to the same rule
+ * (`judgeRecordTierEvidence`): the action carries `"tier_evidence": "TRANSCRIPT"` (`TIER_EVIDENCE_KEY`), or the file
+ * is refused as usage (2), nothing packed, a dry run included — and a `comment`'s refusal names post-stamped. The
+ * reader is the stamped writers' own, post-stamped's `recordTierEvidenceRefusal` (`loadRecordTierJudge`: the record
+ * recognised by `record-recognisers.mjs`, the transcript judged by `verify-review-tier.mjs`), so a body is refused
+ * here exactly when post-stamped would refuse it; ⛔ no reader is restated in this file. Fail closed: a missing,
+ * empty, unreadable or off-tier transcript refuses, and so does a reader that does not load (3). A body that is no
+ * record, or a record naming another tier, passes unchanged with no evidence; `tier_evidence` on any other op is
+ * refused.
+ *
+ * The evidence is judged HERE, on the seat, and ⛔ never travels: the key is taken off every action before the
+ * packer, so neither the path nor the transcript enters the payload. Two measured reasons, not a preference — the
+ * runner reads no file on the seat's disk, and a transcript does not fit a dispatch (a session's own transcript
+ * measured 882,560 bytes after 15 turns, against `CLIENT_PAYLOAD_MAX_BYTES`, 65,536 for the whole payload). A
+ * transcript also names a model on every turn, and AGENTS.md keeps model identifiers off GitHub. The library path
+ * (`packRequest`) is not judged, as for the signature above: its callers judge their own body first (post-stamped and
+ * label-write through `judgeBody`), and a sender that builds its own dispatch bypasses every seat-side door alike.
  *
  * ## Exit codes — capture them BEFORE any pipe
  *
@@ -529,12 +563,12 @@
  *       reads back as the bytes sent, and every run it started is listed.
  *   2   usage, the packed payload refused by the validator, a seat's edit body
  *       carrying no signature line, a trailer-signed `issue_patch` body whose
- *       target the platform answers is an issue, or an adding op refused by the
- *       kind rule (nothing sent).
+ *       target the platform answers is an issue, an adding op refused by the
+ *       kind rule, or a stroke refused by the stateless write (nothing sent).
  *   3   PREREQUISITE NOT MET — no token, no session in dispatch mode, the
  *       dispatch route dead (401/407/0), the run list unreadable, or the target
- *       of a trailer-signed `issue_patch` body or of a governed `labels_add`
- *       unreadable (nothing sent).
+ *       of a trailer-signed `issue_patch` body, of a governed `labels_add` or of
+ *       a card the stateless write judges unreadable (nothing sent).
  *   4   NOT STORED — the run succeeded and the read-back shows a body the board
  *       does not hold as sent (op, object and first differing byte printed).
  *       Go READ it; ⛔ do not retry.
@@ -554,10 +588,10 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { isEntrypoint } from '../../invoked-as.mjs';
-import { EXIT_PREREQUISITE_NOT_MET, LANE_LABEL_ALIASES, PROXY_FLAG, proxyRearmPlan, proxyRoute, readSignatureLine, SEAT_SIGNATURE_LINE, SEAT_SIGNATURE_SHAPE, signatureRefusal, signatureRefusalText } from '../check-half-states.mjs';
+import { DECISION_INBOX_LABEL, EXIT_PREREQUISITE_NOT_MET, LANE_LABEL_ALIASES, PM_EXCLUSIVE_STATE_LABELS, PROXY_FLAG, proxyRearmPlan, proxyRoute, readSignatureLine, SEAT_SIGNATURE_LINE, SEAT_SIGNATURE_SHAPE, signatureRefusal, signatureRefusalText } from '../check-half-states.mjs';
 // The roster's generator marker, IMPORTED so the one generated body this door exempts is named by its own writer.
 import { ROSTER_MARKER } from '../fleet-roster.mjs';
-import { KIND_ISSUE, KIND_PULL, KIND_RULE_AWAITING_MERGE_PR_ONLY, KIND_RULE_PATH, KIND_RULE_STATES_ON_ISSUES, classifyHttp, readTargetKind, refuseKindLabels } from '../label-write.mjs';
+import { KIND_ISSUE, KIND_PULL, KIND_RULE_AWAITING_MERGE_PR_ONLY, KIND_RULE_PATH, KIND_RULE_STATES_ON_ISSUES, PARKED_RULE, PARKED_STATE_LABELS, STATELESS_RULE, classifyHttp, labelKey, readTargetKind, refuseKindLabels, refuseStatelessWrite } from '../label-write.mjs';
 import { DEFAULT_BATCH_GAP_MS, DEFAULT_BATCH_THRESHOLD, EXIT_WRITE_PACE_REFUSED, fmtDuration, isWriteMethod, noteResponse, paceWrite, releaseWriteLease } from '../write-pace.mjs';
 import {
   ADVISORY_NOTE_DIGEST_KEY_BYTES,
@@ -925,6 +959,81 @@ export function editBodyRefusalText(row) {
   );
 }
 
+/** The actions-file key naming the transcript behind a `## Contract review` record a raw comment carries (header). */
+export const TIER_EVIDENCE_KEY = 'tier_evidence';
+
+/** The ops whose body this door judges for a record's tier: the two that write a COMMENT, because a record IS one. */
+export const TIER_EVIDENCE_OPS = Object.freeze(['comment', 'comment_edit']);
+
+/**
+ * The record tier's ONE reader and the tier's name, loaded the way the read-back's judge is (`loadReadBackJudge`):
+ * post-stamped imports THIS file, so the import back waits until this module has settled. `refusalOf` is
+ * post-stamped's `recordTierEvidenceRefusal` — the record recognised by `record-recognisers.mjs`, the evidence judged
+ * by `verify-review-tier.mjs` — so this door refuses exactly what the stamped writers refuse; ⛔ never restated here.
+ */
+export async function loadRecordTierJudge() {
+  const [{ recordTierEvidenceRefusal }, { CONTRACT_REVIEW_TIER_NAME }] = await Promise.all([import('../post-stamped.mjs'), import('../dispatch-gates.mjs')]);
+  return { refusalOf: recordTierEvidenceRefusal, tierName: CONTRACT_REVIEW_TIER_NAME };
+}
+
+/**
+ * Judge every action of a seat's actions file for a record's tier (header: "A raw comment carrying a record's tier").
+ * A `comment` or `comment_edit` whose body `refusalOf` reads as a record naming the tier must carry `tier_evidence`,
+ * the path of the reviewing run's transcript, and `refusalOf` must pass on it; any other body passes unchanged with no
+ * evidence. The key is read HERE and taken off every action, so the path never leaves this process. ⛔ The key on any
+ * other op, or naming no file, is refused. Pure but for the one read `refusalOf` makes of the transcript.
+ *
+ * @param {unknown} actions the actions file as handed
+ * @param {(body: string, evidence: string|null) => ({ why: string }|null)} refusalOf the stamped writers' reader
+ * @returns {{ actions: unknown, refused: { action: number, op: string, why: string, kind: 'record'|'key' }[], read: { action: number, op: string, judged: boolean }[] }}
+ *   `actions` without the key; `refused` empty when the file may go on; `read` one row per action that carried the key
+ *   and passed — `judged: false` when its body names no tier, so the transcript was never opened.
+ */
+export function judgeRecordTierEvidence(actions, refusalOf) {
+  if (!Array.isArray(actions)) return { actions, refused: [], read: [] };
+  const refused = [];
+  const read = [];
+  const out = actions.map((a, i) => {
+    if (a === null || typeof a !== 'object' || Array.isArray(a)) return a;
+    const action = i + 1;
+    const op = String(a.op);
+    const claimsTier = () => TIER_EVIDENCE_OPS.includes(a.op) && typeof a.body === 'string' && refusalOf(a.body, null) !== null;
+    if (!Object.hasOwn(a, TIER_EVIDENCE_KEY)) {
+      if (claimsTier()) refused.push({ action, op, kind: 'record', why: `the action carries no ${TIER_EVIDENCE_KEY}, so nothing shows the review was served at the tier` });
+      return a;
+    }
+    const { [TIER_EVIDENCE_KEY]: evidence, ...rest } = a;
+    if (!TIER_EVIDENCE_OPS.includes(a.op)) {
+      refused.push({ action, op, kind: 'key', why: `${TIER_EVIDENCE_KEY} rides a ${TIER_EVIDENCE_OPS.join(' or ')} whose body is a \`## Contract review\` record; a ${op} carries no record` });
+    } else if (typeof evidence !== 'string' || evidence === '') {
+      refused.push({ action, op, kind: 'key', why: `${TIER_EVIDENCE_KEY} names no file — it is the path of the reviewing run's transcript, a non-empty string` });
+    } else if (!claimsTier()) {
+      read.push({ action, op, judged: false });
+    } else {
+      const refusal = refusalOf(a.body, evidence);
+      if (refusal === null) read.push({ action, op, judged: true });
+      else refused.push({ action, op, kind: 'record', why: refusal.why });
+    }
+    return rest;
+  });
+  return { actions: out, refused, read };
+}
+
+/** The refusal a seat reads for one `judgeRecordTierEvidence` row. ⛔ No path and no model identifier in it. Pure. */
+export function recordTierRefusalText(row, tierName) {
+  if (row.kind === 'key') return `fleet-write/dispatch: REFUSED — action ${row.action} (${row.op}): ${row.why}.`;
+  return (
+    `fleet-write/dispatch: REFUSED — action ${row.action} (${row.op})'s body is a \`## Contract review\` record declaring \`Served-tier: ${tierName}\` without evidence that passes: ${row.why}.\n` +
+    (row.op === 'comment' ? '  Post it with the stamped writer, `node scripts/pm/post-stamped.mjs --comment=N --file=PATH --tier-evidence=TRANSCRIPT`,\n  or give' : '  Give') +
+    ` this action "${TIER_EVIDENCE_KEY}": "TRANSCRIPT", the transcript of the run that REVIEWED: a review sub-agent's output file,\n` +
+    "  or the reviewing session's own transcript under ~/.claude/projects/ (SESSION.jsonl, every turn of it). The file is read HERE, on\n" +
+    '  the seat, and never enters the payload: the runner reads no local file, and a transcript does not fit a dispatch.\n' +
+    '  `node scripts/pm/verify-review-tier.mjs TRANSCRIPT` reads the same verdict. A transcript that refuses means the review\n' +
+    "  did not run at the tier: rerun it with the tier's model passed explicitly, ⛔ never send the record as at-tier and ⛔ never\n" +
+    '  rename its tier to clear this.'
+  );
+}
+
 /**
  * Is each trailer-signed `issue_patch` target a pull request? ONE `GET /repos/{repo}/issues/{issue}` per distinct
  * number — the read-back's locator for this op — judged in three buckets (header): `pull` (200 with a
@@ -1052,8 +1161,8 @@ export function kindRuleRows(actions) {
  *
  * @returns {Promise<{ action: number, issue: unknown, verdict: 'pass'|'refused'|'unread', kind: string|null, refusal: string|null }[]>}
  */
-export async function readLabelTargetKinds(reads, { repo, api = DEFAULT_API, fetch, token = '' } = {}) {
-  const seen = new Map();
+export async function readLabelTargetKinds(reads, { repo, api = DEFAULT_API, fetch, token = '', cache = new Map() } = {}) {
+  const seen = cache;
   const rows = [];
   for (const c of reads) {
     const path = `/repos/${repo}/issues/${c.issue}`;
@@ -1070,6 +1179,94 @@ export async function readLabelTargetKinds(reads, { repo, api = DEFAULT_API, fet
     rows.push({ action: c.action, issue: c.issue, verdict: 'unread', kind: null, refusal: refuseKindLabels({ kind: null, why, add: c.labels, ref }) });
   }
   return rows;
+}
+
+/** The ops whose effect on ONE card the stateless write judges (header: "The stateless write"). */
+export const STATE_GUARD_OPS = Object.freeze(['labels_add', 'labels_remove', 'assign', 'unassign', 'issue_patch']);
+
+/**
+ * The stateless write at the relay's door (header: "The stateless write"), asked of an actions file: per card, the
+ * stroke's steps in order, whether the stroke closes it, and whether it must be READ — it takes a `pm:*` state off
+ * (`labels_remove`), parks the card (`labels_add` of `PARKED_STATE_LABELS`) or assigns someone to it (`assign`: the
+ * card may already be parked), and does not close it. Cards the stroke neither strips, parks nor assigns, and cards
+ * it closes, read nothing. The judgement is label-write's `refuseStatelessWrite`,
+ * ⛔ never restated here. Pure.
+ *
+ * The stroke's LAST `issue_patch` with a `state` decides the card's end state: `closed` closes it (`closes`), `open`
+ * reopens it (`reopens`), and a reopened card is judged OPEN whatever its read says — a stroke that reopens a closed
+ * card and strips its last state leaves an open card with none.
+ *
+ * @returns {{ action: number, issue: unknown, steps: { op: string, names: string[] }[], closes: boolean, reopens: boolean }[]}
+ */
+export function stateGuardRows(actions) {
+  if (!Array.isArray(actions)) return [];
+  // Asked inside the call, never at module scope: label-write imports this file, so its constants may not exist yet there.
+  const pmStates = new Set(PM_EXCLUSIVE_STATE_LABELS.filter((l) => l !== DECISION_INBOX_LABEL).map(labelKey));
+  const parked = new Set(PARKED_STATE_LABELS.map(labelKey));
+  const byIssue = new Map();
+  actions.forEach((a, i) => {
+    if (!a || typeof a !== 'object' || !STATE_GUARD_OPS.includes(a.op)) return;
+    if (!byIssue.has(a.issue)) byIssue.set(a.issue, { action: i + 1, issue: a.issue, steps: [], closes: false, reopens: false, judged: false });
+    const row = byIssue.get(a.issue);
+    if (a.op === 'issue_patch') {
+      if ('state' in a) {
+        row.closes = a.state === 'closed';
+        row.reopens = a.state === 'open';
+      }
+      return;
+    }
+    const names = Array.isArray(a.labels) ? a.labels : Array.isArray(a.assignees) ? a.assignees : [];
+    row.steps.push({ op: a.op, names: [...names] });
+    if (a.op === 'labels_remove' && names.some((l) => pmStates.has(labelKey(l)))) row.judged = true;
+    if (a.op === 'labels_add' && names.some((l) => parked.has(labelKey(l)))) row.judged = true;
+    // An assign may land a holder on a card ALREADY parked: only the read can say, so any assign is read.
+    if (a.op === 'assign' && names.length > 0) row.judged = true;
+  });
+  return [...byIssue.values()].filter((r) => r.judged && !r.closes).map(({ judged, ...r }) => r);
+}
+
+/**
+ * One card's stroke applied to its READ: the label and assignee sets before and after, in the stroke's order, and the
+ * stateless write's verdict on them. Labels union and drop case-insensitively, as GitHub matches them. Pure.
+ */
+export function judgeStateGuard(row, card) {
+  const names = (raw, key) => (Array.isArray(raw) ? raw : []).map((x) => (typeof x === 'string' ? x : x?.[key])).filter(Boolean);
+  const current = names(card?.labels, 'name');
+  const currentAssignees = names(card?.assignees, 'login');
+  let target = [...current];
+  let assigneeTarget = [...currentAssignees];
+  for (const { op, names: ns } of row.steps) {
+    if (op === 'labels_add') for (const l of ns) if (!target.some((x) => labelKey(x) === labelKey(l))) target.push(l);
+    if (op === 'labels_remove') target = target.filter((x) => !ns.some((l) => labelKey(l) === labelKey(x)));
+    if (op === 'assign') for (const u of ns) if (!assigneeTarget.includes(u)) assigneeTarget.push(u);
+    if (op === 'unassign') assigneeTarget = assigneeTarget.filter((u) => !ns.includes(u));
+  }
+  const { kind } = readTargetKind(card);
+  // A stroke that reopens the card is judged on the card it leaves: OPEN, whatever the read said.
+  const state = row.reopens ? 'open' : (card?.state ?? 'open');
+  return refuseStatelessWrite({ state, closes: row.closes, kind, current, target, currentAssignees, assigneeTarget });
+}
+
+/**
+ * Each judged card READ once (`GET /repos/{repo}/issues/{issue}`) and its stroke judged: `pass`, `refused` (the
+ * sentence), or `unread` (any answer but a 200 object, or none — ⛔ never a pass). Reads only, never paced; never throws.
+ */
+export async function readStateGuard(rows, { repo, api = DEFAULT_API, fetch, token = '', cache = new Map() } = {}) {
+  const out = [];
+  for (const row of rows) {
+    const path = `/repos/${repo}/issues/${row.issue}`;
+    // `cache` is the kind rule's own read of the same card when it made one: ONE GET per number per stroke.
+    if (!cache.has(row.issue)) cache.set(row.issue, await rest(api, path, {}, { fetch, token }));
+    const r = cache.get(row.issue);
+    if (r.status === 200 && r.json !== null && typeof r.json === 'object' && !Array.isArray(r.json)) {
+      const refusal = judgeStateGuard(row, r.json);
+      out.push({ action: row.action, issue: row.issue, verdict: refusal === null ? 'pass' : 'refused', refusal });
+      continue;
+    }
+    const why = `GET ${path} answered ${r.status === 0 ? `nothing — ${r.detail}` : `HTTP ${r.status}${r.detail ? ` (${r.detail})` : ''}`}`;
+    out.push({ action: row.action, issue: row.issue, verdict: 'unread', refusal: `the stroke takes a pm state off ${repo}#${row.issue}, parks it or assigns someone to it, and the card could not be read to judge it: ${why}` });
+  }
+  return out;
 }
 
 export function packRequest({ repo, session, actions, requestId = null, now = Date.now } = {}) {
@@ -2388,7 +2585,11 @@ export async function resolveRoute(env = process.env, deps = {}) {
 // injected clock, an injected throttle, no network.
 // ---------------------------------------------------------------------------
 
+const STATELESS_DOOR_BATTERY = "the stateless write at the relay's door: an actions file that takes a card's last pm state off, or parks it with a holder (an assign onto a parked card included), is refused before the dry-run exit with label-write's own sentence; the card read ONCE, shared with the kind rule; an unread card never a pass; a stroke closing its card reads nothing";
+const RECORD_TIER_BATTERY = "a raw comment carrying a record's tier: a comment or comment_edit whose body is a record naming the tier is refused before anything is packed unless its tier_evidence passes post-stamped's own reader, the key taken off so no path leaves; an off-tier, missing or unreadable transcript and a reader that does not load fail closed; a body that is no record, or names another tier, passes unchanged";
 const SELF_TEST_BATTERIES = Object.freeze({
+  [RECORD_TIER_BATTERY]: 17,
+  [STATELESS_DOOR_BATTERY]: 10,
   'the selector: OS_FLEET_TRANSPORT wins; auto is dispatch only under all three conditions and direct otherwise': 8,
   'the session: OS_FLEET_SESSION first, else derived from the container (cse_<id> → session_<id>), the reason naming the source; refused in dispatch mode when absent, never invented': 14,
   'the three conditions of auto: cloud, session and a live relay — each alone failing is direct with its line, all three is dispatch, explicit dispatch stays strict': 16,
@@ -2424,8 +2625,9 @@ const SELF_TEST_BATTERIES = Object.freeze({
 // Raised 21 → 22 with the run_rerun_failed seat battery, 22 → 23 with the signature battery, 23 → 24 with the
 // hierarchy link seat battery, 24 → 25 with the pull request body battery, 25 → 26 with the advisory rows' seat
 // battery, 26 → 27 with advisory_read's seat battery, 27 → 28 with the retired lane aliases battery, 29 → 30 with
-// advisory_list's seat battery, 30 → 31 with advisory_note's seat battery: one battery, one row.
-const SELF_TEST_BATTERY_FLOOR = 31;
+// advisory_list's seat battery, 30 → 31 with advisory_note's seat battery, 32 → 33 with the record tier's seat
+// battery: one battery, one row.
+const SELF_TEST_BATTERY_FLOOR = 33;
 const UNATTRIBUTED_BATTERY = '(unattributed)';
 
 const batteryCases = new Map();
@@ -4032,6 +4234,73 @@ export async function selfTest() {
       })());
     }
 
+    // ── a raw comment carrying a record's tier (#33715) ──────────────────────
+    battery(RECORD_TIER_BATTERY);
+    {
+      const { CONTRACT_REVIEW_TIER: TIER, CONTRACT_REVIEW_TIER_NAME: TIER_NAME, TIER_DEFAULT_NAME } = await import('../dispatch-gates.mjs');
+      const judge = await loadRecordTierJudge();
+      const SIG = `domain:skills#1 · os-project-manager · ${SESSION}`;
+      const OTHER = 'other-model-for-the-self-test';
+      const REC = (tierName) => [SIG, '', '## Contract review', '', `Served-tier: \`${tierName}\``, 'Head-sha: `0123456789abcdef0123456789abcdef01234567`', 'Local-runs: none', '', '**VERDICT: PASS**'].join('\n');
+      const NOTE = `${SIG}\n\nA note: a record carries \`Served-tier: ${TIER_NAME}\` on its own line.`;
+      const turn = (model) => JSON.stringify({ type: 'assistant', requestedModel: model, message: { role: 'assistant', model, content: [] } });
+      const atTier = join(dir, 'tier-at.output');
+      const offTier = join(dir, 'tier-off.output');
+      const missing = join(dir, 'tier-missing.output');
+      writeFileSync(atTier, [JSON.stringify({ type: 'user', message: { content: 'review' } }), turn(TIER), turn(TIER)].join('\n'), 'utf8');
+      writeFileSync(offTier, [JSON.stringify({ type: 'user', message: { content: 'review' } }), turn(TIER), turn(OTHER)].join('\n'), 'utf8');
+      const J = (actions) => judgeRecordTierEvidence(actions, judge.refusalOf);
+      const rows = (r) => r.refused.map((x) => `${x.action}:${x.op}:${x.kind}`);
+      const bare = J([{ op: 'comment', issue: 7, body: REC(TIER_NAME) }]);
+      t('⛔ a comment whose body is a record naming the tier, with NO tier_evidence, is refused — action 1, a record row', [rows(bare), bare.refused[0]?.why.includes('tier_evidence')], [['1:comment:record'], true]);
+      const good = J([{ op: 'comment', issue: 7, body: REC(TIER_NAME), tier_evidence: atTier }]);
+      t('⭐ …and passes on a transcript served at the tier throughout — read, judged, and the key taken off: the action leaves as op, issue and body alone', [rows(good), good.read, Object.keys(good.actions[0])], [[], [{ action: 1, op: 'comment', judged: true }], ['op', 'issue', 'body']]);
+      const off = J([{ op: 'comment', issue: 7, body: REC(TIER_NAME), tier_evidence: offTier }]);
+      t("⛔ an OFF-TIER transcript is refused, on verify-review-tier's own verdict", [rows(off), off.refused[0]?.why.startsWith('verify-review-tier: REFUSED')], [['1:comment:record'], true]);
+      t('⛔ fail closed: a transcript that cannot be read is refused (a record row), and one named by an empty string or a non-string is refused (a key row)', [rows(J([{ op: 'comment', issue: 7, body: REC(TIER_NAME), tier_evidence: missing }])), rows(J([{ op: 'comment', issue: 7, body: REC(TIER_NAME), tier_evidence: '' }, { op: 'comment', issue: 7, body: REC(TIER_NAME), tier_evidence: 17 }]))], [['1:comment:record'], ['1:comment:key', '2:comment:key']]);
+      const plain = [{ op: 'comment', issue: 7, body: NOTE }, { op: 'comment', issue: 7, body: REC(TIER_DEFAULT_NAME) }];
+      const passed = J(plain);
+      t('⭐ a body that is NOT a record (one that only mentions the line) and a record naming ANOTHER tier pass unchanged, with no evidence — the very objects handed', [rows(passed), passed.read, passed.actions[0] === plain[0] && passed.actions[1] === plain[1]], [[], [], true]);
+      const unread = J([{ op: 'comment', issue: 7, body: NOTE, tier_evidence: missing }]);
+      t('a key on a body that names no tier is NEVER opened (a missing file passes) and is taken off, said as not judged', [rows(unread), unread.read, Object.keys(unread.actions[0])], [[], [{ action: 1, op: 'comment', judged: false }], ['op', 'issue', 'body']]);
+      t('⛔ comment_edit is held to the same rule both ways: refused bare and off-tier, passed at the tier', [rows(J([{ op: 'comment_edit', comment_id: 9, body: REC(TIER_NAME) }])), rows(J([{ op: 'comment_edit', comment_id: 9, body: REC(TIER_NAME), tier_evidence: offTier }])), rows(J([{ op: 'comment_edit', comment_id: 9, body: REC(TIER_NAME), tier_evidence: atTier }]))], [['1:comment_edit:record'], ['1:comment_edit:record'], []]);
+      t("⛔ tier_evidence on any other op is refused; an issue_patch body carrying a record is a card body, untouched — post-stamped's own scope", [rows(J([{ op: 'labels_add', issue: 7, labels: ['x'], tier_evidence: atTier }])), rows(J([{ op: 'issue_patch', issue: 7, body: REC(TIER_NAME) }]))], [['1:labels_add:key'], []]);
+      t('the judged ops are exactly the two that write a comment, both in the table with a body', [[...TIER_EVIDENCE_OPS], TIER_EVIDENCE_OPS.every((op) => OPS[op] && OPS[op].required.includes('body'))], [['comment', 'comment_edit'], true]);
+      const texts = [...bare.refused, ...off.refused].map((r) => recordTierRefusalText(r, judge.tierName));
+      t('⛔ no refusal carries a model identifier or the transcript path; a comment\'s names post-stamped and the key, and the tier by its NAME', [texts.some((x) => x.includes(TIER) || x.includes(OTHER) || x.includes(dir)), texts.every((x) => x.includes('post-stamped.mjs') && x.includes('"tier_evidence"') && x.includes(`Served-tier: ${TIER_NAME}`))], [false, true]);
+      writeFileSync(join(dir, 'tier-bare.json'), JSON.stringify([{ op: 'comment', issue: 7, body: REC(TIER_NAME) }]), 'utf8');
+      writeFileSync(join(dir, 'tier-good.json'), JSON.stringify([{ op: 'comment', issue: 7, body: REC(TIER_NAME), tier_evidence: atTier }]), 'utf8');
+      writeFileSync(join(dir, 'tier-off.json'), JSON.stringify([{ op: 'comment', issue: 7, body: REC(TIER_NAME), tier_evidence: offTier }]), 'utf8');
+      const env = (extra) => ({ ...process.env, GITHUB_TOKEN: TOKEN, GH_TOKEN: '', HTTPS_PROXY: '', https_proxy: '', OS_PM_WRITE_PACE_FILE: join(dir, 'tier-pace.jsonl'), [SESSION_ENV]: SESSION, [CONTAINER_SESSION_ENV]: '', ...extra });
+      const spawn = (file, extra = {}) => spawnSync(process.execPath, [SELF_PATH, '--repo', 'objectstack-ai/objectstack', '--actions-file', join(dir, file), '--dry-run'], { encoding: 'utf8', env: env(extra) });
+      const cliBare = spawn('tier-bare.json');
+      t('⭐ the CLI refuses the bare record on a DRY RUN: usage (2), the refusal names action 1, post-stamped and the key, and no payload is printed', [cliBare.status, cliBare.stderr.includes("action 1 (comment)'s body is a `## Contract review` record") && cliBare.stderr.includes('post-stamped.mjs') && cliBare.stderr.includes('"tier_evidence"'), cliBare.stdout.includes('"event_type"')], [EXIT_USAGE, true, false], cliBare.stderr.slice(-300));
+      const cliNoSession = spawn('tier-bare.json', { [SESSION_ENV]: '' });
+      t('…judged on the file as handed, before the session: the same refusal with no session in the environment', [cliNoSession.status, cliNoSession.stderr.includes('without evidence that passes')], [EXIT_USAGE, true]);
+      const cliGood = spawn('tier-good.json');
+      const goodPayload = cliGood.status === EXIT_OK ? JSON.parse(cliGood.stdout).client_payload.actions : null;
+      t('⭐ with tier_evidence at the tier the dry run packs: exit 0, the action as op, issue and body, and NEITHER the path NOR the model anywhere in the payload', [cliGood.status, goodPayload?.map((a) => Object.keys(a)), cliGood.stdout.includes(atTier) || cliGood.stdout.includes(TIER), cliGood.stderr.includes('passes verify-review-tier')], [EXIT_OK, [['op', 'issue', 'body']], false, true], cliGood.stderr.slice(-300));
+      const cliOff = spawn('tier-off.json');
+      t('⛔ an off-tier transcript through the CLI: usage (2), nothing printed to stdout', [cliOff.status, cliOff.stdout], [EXIT_USAGE, ''], cliOff.stderr.slice(-300));
+      const keepErr = console.error;
+      const printed = [];
+      console.error = (l) => printed.push(String(l));
+      let unloaded;
+      try {
+        unloaded = await main(['--repo', 'objectstack-ai/objectstack', '--actions-file', join(dir, 'tier-good.json'), '--dry-run'], { env: { [SESSION_ENV]: SESSION }, recordTierJudge: async () => { throw new Error('fixture: no reader'); } });
+      } finally {
+        console.error = keepErr;
+      }
+      t('⛔ fail closed: a reader that does not load is PREREQUISITE NOT MET (3), never a pass', [unloaded, printed.some((l) => l.includes('PREREQUISITE NOT MET') && l.includes('record-tier reader'))], [EXIT_PREREQUISITE, true]);
+      t("structural: the reader is post-stamped's recordTierEvidenceRefusal, loaded, and ⛔ no record or transcript reader is restated in this file", [judge.refusalOf === (await import('../post-stamped.mjs')).recordTierEvidenceRefusal, /function\s+(readServedTier|judgeReviewTranscript|verifyReviewTranscriptFile|recordTierEvidenceRefusal)\b/u.test(readReal(SELF_PATH, 'utf8'))], [true, false]);
+      t('structural: the check runs in main after the file is parsed and BEFORE the session and the packer', (() => {
+        const src = readReal(SELF_PATH, 'utf8');
+        const body = src.slice(src.lastIndexOf('export async function main('));
+        const at = body.indexOf('judgeRecordTierEvidence(actions');
+        return at > body.indexOf('JSON.parse(readFileSync(opts.actionsFile') && at < body.indexOf('const session = opts.session') && at < body.indexOf('packRequest(');
+      })());
+    }
+
     // ── the pull request body at the seat's door ───────────────────────────
     battery("the pull request body at the seat's door: an issue_patch body signed only by its LAST-line trailer passes when the platform answers its target is a pull request, before the dry-run exit; an issue, an unread target and a trailer-less body are refused; comment_edit takes no trailer");
     {
@@ -4186,7 +4455,7 @@ export async function selfTest() {
       t('⭐ CLI: an UNREADABLE kind on labels_add is PREREQUISITE NOT MET (3), the rule quoted, no payload — never a pass', [cliBlind.code, cliBlind.err.includes('PREREQUISITE NOT MET') && RULE(cliBlind.err), cliBlind.out.includes('"event_type"')], [EXIT_PREREQUISITE, true, false], cliBlind.err.slice(-300));
       const cliLegal = await cli([{ op: 'labels_add', issue: 2, labels: ['pm:queue'] }], { [at(2)]: ISSUE(2) });
       t('a state on an issue packs: exit 0, one GET, the payload printed with the labels as written', [cliLegal.code, cliLegal.seen, cliLegal.code === EXIT_OK ? JSON.parse(cliLegal.out).client_payload.actions[0].labels : null], [EXIT_OK, [`GET ${at(2)}`], ['pm:queue']], cliLegal.err.slice(-300));
-      const cliQuiet = await cli([{ op: 'labels_add', issue: 1, labels: ['tooling'] }, { op: 'labels_remove', issue: 1, labels: ['pm:queue', 'Needs-User-Decision'] }], {});
+      const cliQuiet = await cli([{ op: 'labels_add', issue: 1, labels: ['tooling'] }, { op: 'labels_remove', issue: 1, labels: ['pm:awaiting-merge', 'Needs-User-Decision'] }], {});
       t('⛔ a removal is never refused and an ungoverned labels_add reads nothing: exit 0, ZERO reads', [cliQuiet.code, cliQuiet.seen], [EXIT_OK, []], cliQuiet.err.slice(-300));
       const cliWhole = await cli([{ op: 'comment', issue: 2, body: 'domain:skills#3 · huangyiirene · ' + SESSION + '\nnote' }, { op: 'labels_add', issue: 1, labels: ['pm:blocked'] }], { [at(1)]: PULL(1) }, { dryRun: false });
       t('⭐ a refusal sends NOTHING for the whole file: a real (non-dry) run with a legal comment beside it is usage (2) with zero requests sent', [cliWhole.code, cliWhole.sent, cliWhole.err.includes('REFUSED — action 2 (labels_add)')], [EXIT_USAGE, [], true], cliWhole.err.slice(-300));
@@ -4199,6 +4468,42 @@ export async function selfTest() {
         const read = body.indexOf('readLabelTargetKinds(labelReads');
         return rows > body.indexOf('rewriteRetiredLaneActions(actions)') && rows < body.indexOf('const session = opts.session') && read > body.indexOf('packRequest(') && read < body.indexOf('if (opts.dryRun)');
       })());
+
+      // ── the stateless write at the relay's door (same fixtures: the kind rule's read is the guard's read) ──
+      battery(STATELESS_DOOR_BATTERY);
+      const CARD = (n, labels, assignees = []) => ({ status: 200, json: { number: n, state: 'open', html_url: `https://github.com/${REPO}/issues/${n}`, labels: labels.map((name) => ({ name })), assignees: assignees.map((login) => ({ login })) } });
+      t('rows: a stroke taking a pm state off, parking, or assigning is judged; a stroke closing the card, or touching no state and assigning no one, is not', [
+        stateGuardRows([{ op: 'labels_remove', issue: 3, labels: ['pm:dispatched'] }]).map((r) => r.issue),
+        stateGuardRows([{ op: 'labels_remove', issue: 3, labels: ['pm:dispatched'] }, { op: 'issue_patch', issue: 3, state: 'closed', state_reason: 'completed' }]).length,
+        stateGuardRows([{ op: 'labels_remove', issue: 3, labels: ['size/l', DECISION_INBOX_LABEL] }, { op: 'unassign', issue: 3, assignees: ['os-x'] }]).length,
+        stateGuardRows([{ op: 'labels_add', issue: 4, labels: ['PM:Blocked'] }]).map((r) => r.issue),
+        stateGuardRows([{ op: 'assign', issue: 5, assignees: ['os-x'] }]).map((r) => r.issue),
+      ], [[3], 0, 0, [4], [5]]);
+      t('judge: the stroke applied in order, label-write\'s own sentence', [
+        typeof judgeStateGuard(stateGuardRows([{ op: 'labels_remove', issue: 3, labels: ['pm:dispatched'] }])[0], CARD(3, ['pm:dispatched']).json),
+        judgeStateGuard(stateGuardRows([{ op: 'labels_add', issue: 3, labels: ['pm:queue'] }, { op: 'labels_remove', issue: 3, labels: ['pm:dispatched'] }, { op: 'unassign', issue: 3, assignees: ['os-x'] }])[0], CARD(3, ['pm:dispatched'], ['os-x']).json),
+        typeof judgeStateGuard(stateGuardRows([{ op: 'labels_add', issue: 3, labels: ['pm:queue'] }, { op: 'labels_remove', issue: 3, labels: ['pm:dispatched'] }])[0], CARD(3, ['pm:dispatched'], ['os-x']).json),
+      ], ['string', null, 'string']);
+      const cliStrip = await cli([{ op: 'labels_remove', issue: 3, labels: ['pm:dispatched'] }], { [at(3)]: CARD(3, ['pm:dispatched', 'domain:skills']) }, { dryRun: false });
+      t('⭐ CLI: a stroke leaving an open card with no state is usage (2), refused before the dry-run exit, ZERO requests sent', [cliStrip.code, cliStrip.sent, cliStrip.err.includes('REFUSED') && cliStrip.err.includes(STATELESS_RULE)], [EXIT_USAGE, [], true], cliStrip.err.slice(-300));
+      const cliRelease = await cli([{ op: 'labels_add', issue: 3, labels: ['pm:queue'] }, { op: 'labels_remove', issue: 3, labels: ['pm:dispatched'] }, { op: 'unassign', issue: 3, assignees: ['os-x'] }], { [at(3)]: CARD(3, ['pm:dispatched'], ['os-x']) });
+      t('…the release shape (pm:queue on, pm:dispatched off, holder off) packs: exit 0 on ONE GET, shared with the kind rule', [cliRelease.code, cliRelease.seen], [EXIT_OK, [`GET ${at(3)}`]], cliRelease.err.slice(-300));
+      const cliUnread = await cli([{ op: 'labels_remove', issue: 8, labels: ['pm:on-hold'] }], { [at(8)]: { status: 503, json: { message: 'down' } } });
+      t('…an UNREADABLE card is PREREQUISITE NOT MET (3), never a pass', [cliUnread.code, cliUnread.out.includes('"event_type"')], [EXIT_PREREQUISITE, false], cliUnread.err.slice(-300));
+      const cliClose = await cli([{ op: 'labels_remove', issue: 9, labels: ['pm:queue'] }, { op: 'issue_patch', issue: 9, state: 'closed', state_reason: 'not_planned' }], {});
+      t('…a stroke that closes the card it strips reads nothing and packs', [cliClose.code, cliClose.seen], [EXIT_OK, []], cliClose.err.slice(-300));
+      // An assign-only stroke: label-write refuses a holder landed on a parked card on its own read, and so does this door.
+      const cliAssignParked = await cli([{ op: 'assign', issue: 10, assignees: ['os-x'] }], { [at(10)]: CARD(10, ['pm:queue', 'domain:skills']) }, { dryRun: false });
+      t('⭐ CLI: an assign-ONLY stroke onto a card sitting in pm:queue is usage (2), refused on ONE read, ZERO requests sent', [cliAssignParked.code, cliAssignParked.seen, cliAssignParked.sent, cliAssignParked.err.includes('REFUSED') && cliAssignParked.err.includes(PARKED_RULE)], [EXIT_USAGE, [`GET ${at(10)}`], [], true], cliAssignParked.err.slice(-300));
+      const cliAssignFlight = await cli([{ op: 'assign', issue: 11, assignees: ['os-x'] }], { [at(11)]: CARD(11, ['pm:dispatched', 'domain:skills']) });
+      t('…the same assign onto a pm:dispatched card packs: exit 0 on ONE GET', [cliAssignFlight.code, cliAssignFlight.seen], [EXIT_OK, [`GET ${at(11)}`]], cliAssignFlight.err.slice(-300));
+      // A stroke that REOPENS a closed card is judged on the open card it leaves, never on the read's `closed`.
+      const CLOSED = (n, labels) => ({ status: 200, json: { ...CARD(n, labels).json, state: 'closed' } });
+      const REOPEN = (n) => ({ op: 'issue_patch', issue: n, state: 'open' });
+      const cliReopenStrip = await cli([REOPEN(12), { op: 'labels_remove', issue: 12, labels: ['pm:dispatched'] }], { [at(12)]: CLOSED(12, ['pm:dispatched', 'domain:skills']) }, { dryRun: false });
+      t('⭐ CLI: reopen + taking the last pm state off a CLOSED card is usage (2): the card it leaves is open with no state, ZERO sent', [cliReopenStrip.code, cliReopenStrip.sent, cliReopenStrip.err.includes(STATELESS_RULE)], [EXIT_USAGE, [], true], cliReopenStrip.err.slice(-300));
+      const cliReopenState = await cli([REOPEN(13), { op: 'labels_add', issue: 13, labels: ['pm:queue'] }, { op: 'labels_remove', issue: 13, labels: ['pm:dispatched'] }], { [at(13)]: CLOSED(13, ['pm:dispatched', 'domain:skills']) });
+      t('…reopen + a new state in the same stroke packs: exit 0 on ONE GET', [cliReopenState.code, cliReopenState.seen], [EXIT_OK, [`GET ${at(13)}`]], cliReopenState.err.slice(-300));
     }
 
     // ── the no-run conformance ──────────────────────────────────────────────
@@ -4421,6 +4726,9 @@ const USAGE = [
   '  refused (2) before anything is packed; the fleet roster\'s generated body is the one exemption. A pull request\'s',
   `  issue_patch body may instead end with ${PR_BODY_TRAILER_SHAPE} on its last non-empty line: the target is then`,
   '  read from the platform, a dry run included — an issue refused (2), an unread target refused (3).',
+  '  A comment or comment_edit whose body is a `## Contract review` record naming CONTRACT_REVIEW_TIER carries',
+  '  "tier_evidence": "TRANSCRIPT", the reviewing run\'s transcript, which verify-review-tier.mjs must pass (post-stamped\'s',
+  '  rule), or the file is refused (2); the path is read here and never enters the payload.',
   '  An advisory_read names ghsa_id alone: this process makes its one-time key pair, sends the public half, and opens',
   '  the sealed answer with the private half, which never leaves memory. --reveal prints the opened text to stdout, and',
   '  nothing else ever prints it; a public_key in the actions file is refused (2). An advisory_list names nothing at all',
@@ -4499,6 +4807,33 @@ export async function main(argv, deps = {}) {
     console.error('fleet-write/dispatch: nothing was sent.');
     return EXIT_USAGE;
   }
+  // A record's tier (#33715): a comment or comment_edit whose body is a `## Contract review` record naming the tier
+  // carries tier_evidence that the stamped writers' own reader passes — judged on the file as handed, before the
+  // session, the packer or a dry run, and the key taken off so the path never leaves. ⛔ A reader that cannot load
+  // is never a pass.
+  if (Array.isArray(actions) && actions.some((a) => a !== null && typeof a === 'object' && (TIER_EVIDENCE_OPS.includes(a.op) || Object.hasOwn(a, TIER_EVIDENCE_KEY)))) {
+    let judge;
+    try {
+      judge = await (deps.recordTierJudge ?? loadRecordTierJudge)();
+    } catch (e) {
+      console.error(`fleet-write/dispatch: PREREQUISITE NOT MET — the record-tier reader (post-stamped.mjs recordTierEvidenceRefusal) did not load (${e?.message ?? 'no reason'}), so no comment can be judged for a record's tier. Nothing was sent.`);
+      return EXIT_PREREQUISITE;
+    }
+    const tier = judgeRecordTierEvidence(actions, judge.refusalOf);
+    if (tier.refused.length > 0) {
+      for (const row of tier.refused) console.error(recordTierRefusalText(row, judge.tierName));
+      console.error('fleet-write/dispatch: nothing was sent.');
+      return EXIT_USAGE;
+    }
+    for (const r of tier.read) {
+      console.error(
+        r.judged
+          ? `fleet-write/dispatch: action ${r.action} (${r.op}) — its record's ${TIER_EVIDENCE_KEY} passes verify-review-tier; the path stays here and the payload carries the body alone.`
+          : `fleet-write/dispatch: action ${r.action} (${r.op}) — its body names no ${judge.tierName} record, so ${TIER_EVIDENCE_KEY} was not read; the key is dropped.`,
+      );
+    }
+    actions = tier.actions;
+  }
   // A retired lane alias is written as its lane, said once per label on stderr — a dry run included (header of
   // `rewriteRetiredLaneLabels`): a rewrite, never a refusal.
   const lanes = rewriteRetiredLaneActions(actions);
@@ -4555,12 +4890,16 @@ export async function main(argv, deps = {}) {
   // The same read, and the same place, decide a governed labels_add's target kind (header: "The kind rule").
   const candidates = pullRequestBodyCandidates(actions);
   const labelReads = kindRule.reads;
+  const guardRows = stateGuardRows(actions);
+  const cardReads = new Map();
   const readToken = env.GITHUB_TOKEN ?? env.GH_TOKEN ?? '';
-  if (candidates.length > 0 || labelReads.length > 0) {
+  if (candidates.length > 0 || labelReads.length > 0 || guardRows.length > 0) {
     if (!readToken) {
       const needs = candidates.length > 0
         ? `action ${candidates[0].action} (issue_patch)'s body is signed by its trailer, which passes only on a pull request`
-        : `action ${labelReads[0].action} (labels_add) adds a label the kind rule allows on only one kind`;
+        : labelReads.length > 0
+          ? `action ${labelReads[0].action} (labels_add) adds a label the kind rule allows on only one kind`
+          : `the stroke takes a pm state off card ${guardRows[0].issue} or parks it, which the stateless write judges on the card`;
       console.error(`fleet-write/dispatch: PREREQUISITE NOT MET — ${needs}, and with no GITHUB_TOKEN / GH_TOKEN in the environment the target cannot be read. Nothing was sent.`);
       return EXIT_PREREQUISITE;
     }
@@ -4585,7 +4924,7 @@ export async function main(argv, deps = {}) {
     }
   }
   if (labelReads.length > 0) {
-    const kinds = await readLabelTargetKinds(labelReads, { repo: opts.repo, token: readToken, ...(deps.read ?? {}) });
+    const kinds = await readLabelTargetKinds(labelReads, { repo: opts.repo, token: readToken, cache: cardReads, ...(deps.read ?? {}) });
     for (const r of kinds) {
       if (r.verdict === 'pass') console.error(`fleet-write/dispatch: action ${r.action} (labels_add) — ${opts.repo}#${r.issue} reads as ${r.kind === KIND_ISSUE ? 'an' : 'a'} ${r.kind}, and its labels are legal there.`);
       else console.error(`fleet-write/dispatch: ${r.verdict === 'unread' ? 'PREREQUISITE NOT MET' : 'REFUSED'} — action ${r.action} (labels_add): ${r.refusal}`);
@@ -4594,6 +4933,17 @@ export async function main(argv, deps = {}) {
     if (refused.length > 0 || kinds.some((r) => r.verdict === 'unread')) {
       console.error('fleet-write/dispatch: nothing was sent.');
       return refused.length > 0 ? EXIT_USAGE : EXIT_PREREQUISITE;
+    }
+  }
+  if (guardRows.length > 0) {
+    const judged = await readStateGuard(guardRows, { repo: opts.repo, token: readToken, cache: cardReads, ...(deps.read ?? {}) });
+    for (const r of judged) {
+      if (r.verdict === 'pass') console.error(`fleet-write/dispatch: ${opts.repo}#${r.issue} — the stroke leaves it with a state and no holder on a parked state.`);
+      else console.error(`fleet-write/dispatch: ${r.verdict === 'unread' ? 'PREREQUISITE NOT MET' : 'REFUSED'} — ${opts.repo}#${r.issue}: ${r.refusal}`);
+    }
+    if (judged.some((r) => r.verdict !== 'pass')) {
+      console.error('fleet-write/dispatch: nothing was sent.');
+      return judged.some((r) => r.verdict === 'refused') ? EXIT_USAGE : EXIT_PREREQUISITE;
     }
   }
   if (opts.dryRun) {
