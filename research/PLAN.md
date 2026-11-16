@@ -88,4 +88,12 @@
 - 实际未做：独立新 Agent/IDE 指令加载、clone、编译、跑测试、完整协议/多端身份授权证明、源码历史核验、Java/DES-ARC 正式比较、知识被目标项目采用或产生收益。GitHub 本轮只提交研究目录，不改上游源码。
 - **下一批唯一优先入口**：按 RES-03 §7 从协议 `createData/findData` 的实现、身份/权限决策和事务/错误行为继续向下追踪；并开展新 Agent 只读入口验证（在可用独立执行环境中）；若有真实代码运行能力，再做针对性失败路径测试。停止扩大研究标准文件。
 
+**2026-11-16 B1-2 协议与授权机制静态研究（本批待 PR 审查）**：
+- 已读取：主分支七份研究基础文件和 RES-03 首批正文；固定源码基线 6c5d31fac7763e7aaebc5e853c17727698e8126a 的 `protocol.ts` 委托、`protocol-data-crud.ts`、`protocol-data-writes.ts`、`protocol-record-reads.ts`、HTTP/身份解析、ObjectQL 中间件/查写 Facet、`SecurityPlugin` 与授权中间件、事务/更新源码、选定测试和 ADR-0049/0076。
+- 新增实质结果：在 [RES-03 §8—§10](reports/03-runtime-callchains.md) 追到 `HTTP /data → callData → DataProtocol → ObjectQL → SecurityPlugin 中间件 → Driver` 的主要源码连接，识别 `findData` 删除不可信上下文字段、对象授权/RLS/FLS/租户写入检查的不同职责与 Hook 后图像裁决；提取 K-02。
+- **G1 + 局部 G2 静态推理**，不是端到端 G3；不等于检测到或排除了实际越权缺陷。历史 ADR 与测试**本轮只阅读未运行**。
+- 新的重点未决：H-01 `expectedVersion` 的先探测→写入是否由存储原子条件保护；必须先找到 `writePrecondition` 的实际传播，再做交错并发测试，不预判结论。
+- 未完成：独立构建/运行/多驱动 E2E、IDE 自动加载验证、Java/DES-ARC 对照、真实目标工程采用。
+- 下一批：在可执行环境开展定向验证与 H-01 的反证；对 REST/MCP 与身份传播补齐遗漏消费者；不为此扩张研究文件体系。
+
 **中断恢复方法**：先读取本节最新表和 DESIGN §10 最新决策，再核 BASELINE 有无源码版本变化；只恢复未完成的下一项，不因为新会话重做已经确认的研究。每次真实批次结束追加或更新一行，记录实际改动、Git 提交/PR、验证与未完成；有明显设计变化更新 DESIGN，来源变化更新 BASELINE，不在别处复制阶段状态。

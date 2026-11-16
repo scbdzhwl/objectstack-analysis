@@ -66,3 +66,11 @@
 - 第一批实际读取的源码文件、符号和验证强度见 [RES-03](reports/03-runtime-callchains.md)；它的代码事实仍依赖固定快照。`examples/app-showcase/src/coverage.ts` 中 32 个元数据类别的 25/7 分类仅指声明式样例覆盖清单，不能解释为执行通过。
 - 研究规则的文件可读取性已在本会话核查；**未执行新的独立 Agent 加载或 IDE/Codex 指令作用域实测**。
 - 当需要采用最新 ObjectStack 时，先重新固定上游 commit，按影响范围对 RES-03 的 API/Facet/入口逐项差异复核，而不是直接更换本文的 source_commit。
+
+## 8. 2026-11-16 协议与授权机制证据追加
+
+- **源码基线保持**：`6c5d31fac7763e7aaebc5e853c17727698e8126a`。本批研究文件工作基线为 `663a36fc7b0fba24d0e2574e1658e0f3399de7f1`，与被研究源码不是同一身份。PR 审查/合并后应检查研究文件 HEAD，不得改写源码时间线。
+- [RES-03 §8—§10](reports/03-runtime-callchains.md) 记录 `ProtocolDataCrudFacet.findData`、`protocol-data-writes`、身份解析、SecurityPlugin 中间件注册/对象授权/RLS/FLS/租户写入，以及引擎更新和 OCC 的静态证据。
+- 真实反例：`findData` 删除网络查询参数里的 `context` 再加入可信请求上下文；`SecurityPlugin.start` 不能取得 ObjectQL/metadata 时不注册授权中间件；Hook 后组织字段需要最终图像校验。均须以具体部署、入口与实测补充适用域。
+- **未证实假设 H-01**：协议 `assertVersionMatch` 的读取与写入在代码中分步出现，最终是否有数据库原子前置条件尚未验证；不将其标为已确认竞争缺陷。
+- 检查只读取测试源码（含 tenant wall post-hook、协议 OCC token、data write request gate），**未实际运行任何测试或新 Agent/IDE 指令自动加载实验**。
